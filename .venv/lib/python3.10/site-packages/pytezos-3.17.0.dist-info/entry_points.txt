@@ -1,0 +1,4 @@
+[console_scripts]
+michelson-kernel=michelson_kernel.cli:cli
+pytezos=pytezos.cli.cli:cli
+

@@ -1,0 +1,38 @@
+Metadata-Version: 2.1
+Name: simple-bson
+Version: 0.0.3
+Summary: Python Bson Compatible Library
+Home-page: https://github.com/DeltaLaboratory/simple-bson
+Author: DeltaLaboratory
+Author-email: delta@deltalab.dev
+Requires-Python: >=3.6,<4.0
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.6
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Project-URL: Repository, https://github.com/DeltaLaboratory/simple-bson
+Description-Content-Type: text/x-rst
+
+Simple-Bson
+========================
+
+.. image:: https://github.com/DeltaLaboratory/simple-bson/actions/workflows/CI.yml/badge.svg?branch=stable
+    :target: https://github.com/DeltaLaboratory/simple-bson/actions/workflows/CI.yml?branch=stable
+    :alt: stable CI status
+
+Introduction
+------------
+simple-bson is a simple and lightweight bson implementation (current 7.89KiB)
+
+Usage
+------------
+
+.. sourcecode:: python
+
+   >>> import simple_bson as bson
+   >>> a = bson.dumps({"Answer to life the universe and everything": 42})
+   >>> b = bson.loads(a)
+   >>> b
+   {"Answer to life the universe and everything": 42}

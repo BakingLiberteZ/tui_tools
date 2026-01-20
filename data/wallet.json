@@ -1,0 +1,23 @@
+{
+  "rpc": "https://rpc.tzkt.io/mainnet",
+  "accounts": [
+    {
+      "name": "test",
+      "address": "tz1iyEws6cPgpyXmz6oQ7DJfEoX3BdmL4G1X",
+      "enc": {
+        "salt_b64": "/AMMUic0pCkLCunXqGBM+Q==",
+        "nonce_b64": "R4PQ/z4ol1fJHqRc",
+        "ct_b64": "UkarKhkeDnCMU4qEgtn8xU8yPGvujEe33yFsIKRNrhJ5Gf4CniHpZMZy+5t/BIrqLNWeuI005qtm0erpTEkKsY9+bEfw+g=="
+      }
+    }
+  ],
+  "recent_to": [
+    "tz2H7ttWtVVA7dzSvCV4wXXjSwDN8EtK93oQ"
+  ],
+  "tx_prefs": {
+    "advanced": false,
+    "fee_xtz": "",
+    "gas_limit": "",
+    "storage_limit": ""
+  }
+}
