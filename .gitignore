@@ -26,6 +26,7 @@ logs/
 data/wallet.json
 data/wallet.json.bak
 data/backups/
+data/exports/
 
 # Distribution / packaging
 build/
