@@ -1,41 +1,41 @@
 # 💅 Sassy Wallet
 
-Una billetera de Tezos atrevida con actitud. No solo gestiona tus XTZ, sino que te motiva, te reta y te saca sonrisas con comentarios según tu balance, delegación y staking. Con interfaz TUI retro y personalidad única.
+A bold Tezos wallet with attitude. Not just managing your XTZ, but motivating you, challenging you, and making you smile with dynamic comments based on your balance, delegation, and staking behavior. Features a retro TUI interface with unique personality.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-1.3.0-blue)
 ![Python](https://img.shields.io/badge/python-3.10+-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
 ---
 
-## ✨ Características
+## ✨ Features
 
-- 💅 **Personalidad Sassy**: Comentarios divertidos según tu balance, staking y delegación
-- 🎭 **Mensajes Motivacionales**: Sistema de mensajes categorizados (CHAD/BORING/LAZY) con colores psicológicos
-- 🔐 **Seguridad**: Cifrado AES-256 para claves privadas
-- 🌐 **Multi-red**: Soporte para Mainnet y Ghostnet
-- 💰 **Gestión completa**: Ver balance, historial, enviar XTZ
-- 🎨 **Interfaz retro**: Diseño nostálgico con fuentes monoespaciadas
-- ⚡ **Rápido**: Operaciones optimizadas con caché inteligente
-- 🔒 **Thread-safe**: Protección contra race conditions
-- 📝 **Logging estructurado**: Debugging fácil sin exponer información sensible
+- 💅 **Sassy Personality**: Fun comments based on your balance, staking, and delegation
+- 🎭 **Motivational Messages**: Categorized message system (CHAD/BORING/LAZY) with psychological colors
+- 🔐 **Security**: AES-256 encryption for private keys
+- 🌐 **Multi-network**: Support for Mainnet and Ghostnet
+- 💰 **Complete Management**: View balance, history, send XTZ
+- 🎨 **Retro Interface**: Nostalgic design with monospaced fonts
+- ⚡ **Fast**: Optimized operations with smart caching
+- 🔒 **Thread-safe**: Protection against race conditions
+- 📝 **Structured Logging**: Easy debugging without exposing sensitive info
 
 ---
 
-## 🚀 Instalación
+## 🚀 Installation
 
-### Requisitos
+### Requirements
 
-- Python 3.10 o superior
-- pip (gestor de paquetes de Python)
+- Python 3.10 or higher
+- pip (Python package manager)
 
-### Instalar dependencias
+### Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Ejecutar la aplicación
+### Run the Application
 
 ```bash
 python3 app.py
@@ -43,168 +43,164 @@ python3 app.py
 
 ---
 
-## 🎨 Configuración de Fuentes
+## 🎨 Font Configuration
 
-⚠️ **IMPORTANTE:** Las aplicaciones TUI heredan la fuente de tu terminal. Debes configurar la fuente en tu terminal (GNOME Terminal, Kitty, Alacritty, etc.), no en la app.
+⚠️ **IMPORTANT:** TUI applications inherit the font from your terminal. You must configure the font in your terminal (GNOME Terminal, Kitty, Alacritty, etc.), not in the app.
 
-**Fuentes recomendadas (en orden de preferencia):**
-1. **JetBrains Mono** ⭐ (Como Claude Terminal - recomendada)
-2. **IBM Plex Mono** (Retro auténtico - estilo IBM terminal)
-3. **VT323** (Vintage - simula terminales VT)
+**Recommended Fonts (in order of preference):**
+1. **JetBrains Mono** ⭐ (Like Claude Terminal - recommended)
+2. **IBM Plex Mono** (Authentic retro - IBM terminal style)
+3. **VT323** (Vintage - simulates VT terminals)
 
-### Instalación rápida (Ubuntu/Debian)
+### Quick Installation (Ubuntu/Debian)
 
 ```bash
-# JetBrains Mono (recomendada - como Claude Terminal)
+# JetBrains Mono (recommended - like Claude Terminal)
 sudo apt install fonts-jetbrains-mono
 
-# O IBM Plex Mono para look retro auténtico
+# Or IBM Plex Mono for authentic retro look
 sudo apt install fonts-ibm-plex
 
-# O VT323 para look más vintage
+# Or VT323 for more vintage look
 sudo apt install fonts-vt323
 
-# Actualizar caché de fuentes
+# Update font cache
 fc-cache -f -v
 ```
 
-**Después de instalar:**
-1. Configura tu terminal para usar la fuente
-2. Reinicia la terminal
-3. Ejecuta `python3 app.py`
-
-**📖 Guía completa:** Ver [FONTS.md](FONTS.md) para instrucciones detalladas de instalación y configuración por terminal.
+**After installation:**
+1. Configure your terminal to use the font
+2. Restart the terminal
+3. Run `python3 app.py`
 
 ---
 
-## 📋 Uso
+## 📋 Usage
 
-### Teclas de atajo principales
+### Main Keyboard Shortcuts
 
-| Tecla | Acción |
-|-------|--------|
-| `i` | Importar/Crear wallet |
+| Key | Action |
+|-----|--------|
+| `i` | Import/Create wallet |
 | `b` | Backup wallet |
-| `Del` | Eliminar wallet |
-| `s` | Enviar XTZ |
-| `r` | Recibir (mostrar dirección) |
-| `n` | Cambiar red (Mainnet/Ghostnet) |
-| `m` | Ver todas las transacciones |
-| `↑/↓` | Navegar listas |
-| `Enter` | Seleccionar |
-| `Esc` | Volver/Cancelar |
-| `q` | Salir |
+| `Del` | Delete wallet |
+| `s` | Send XTZ |
+| `r` | Receive (show address) |
+| `n` | Change network (Mainnet/Ghostnet) |
+| `m` | View all transactions |
+| `↑/↓` | Navigate lists |
+| `Enter` | Select |
+| `Esc` | Back/Cancel |
+| `q` | Quit |
 
-### Primera vez
+### First Time
 
-Presiona `i` para abrir el selector de importación. Elige tu método:
+Press `i` to open the import selector. Choose your method:
 
-1. **🔑 Importar con Secret Key (Clave privada):**
-   - Ingresa nombre de wallet
-   - Ingresa tu clave privada (edsk...)
-   - 🔮 **La dirección se deriva automáticamente!**
-   - Crea una contraseña para cifrar
-   - ✨ ¡Listo! Wallet completa e importada
+1. **🔑 Import with Secret Key (Private key):**
+   - Enter wallet name
+   - Enter your private key (edsk...)
+   - 🔮 **Address is automatically derived!**
+   - Create a password to encrypt
+   - ✨ Done! Full wallet imported
 
-2. **👀 Watch-Only (Solo monitoreo):**
-   - Ingresa nombre de wallet
-   - Ingresa una dirección de Tezos (tz1/tz2/tz3/tz4)
-   - 👀 Podrás ver balance/historial sin poder enviar
+2. **👀 Watch-Only (Monitoring only):**
+   - Enter wallet name
+   - Enter a Tezos address (tz1/tz2/tz3/tz4)
+   - 👀 You can view balance/history without sending
 
-3. **📦 Desde Backup (Restaurar):**
-   - Ingresa la ruta al archivo de backup JSON
-   - La app valida y extrae los datos
-   - Confirma o renombra la wallet
-   - 🥖 Wallet restaurada con todos sus datos!
-   - Los destinos recientes también se restauran
+3. **📦 From Backup (Restore):**
+   - Enter the path to the backup JSON file
+   - The app validates and extracts the data
+   - Confirm or rename the wallet
+   - 🥖 Wallet restored with all its data!
+   - Recent destinations are also restored
 
-**🎯 Ventaja:** Ya no necesitas ingresar tu dirección manualmente cuando tienes la clave privada. La app la calcula por ti!
+**🎯 Advantage:** You no longer need to manually enter your address when you have the private key. The app calculates it for you!
 
-### Enviar XTZ
+### Send XTZ
 
-1. Selecciona la wallet origen
-2. Presiona `s`
-3. Ingresa dirección destino
-4. Ingresa cantidad
-5. Selecciona nivel de fee (Low/Medium/High)
-6. Confirma y ingresa contraseña
+1. Select the source wallet
+2. Press `s`
+3. Enter destination address
+4. Enter amount
+5. Select fee level (Low/Medium/High)
+6. Confirm and enter password
 
-### Ver transacciones
+### View Transactions
 
-- Las últimas 5 transacciones se muestran automáticamente
-- Presiona `m` para ver historial completo
-- Usa `↑/↓` para navegar
-- Presiona `Enter` para ver detalles de una transacción
-- Click en hash para abrir en TzKT explorer
-
----
-
-## 🔒 Seguridad
-
-### Cifrado
-
-- **Algoritmo**: AES-256-GCM
-- **Key Derivation**: Argon2id (resistente a GPU/ASIC)
-- **Almacenamiento**: `~/.config/tezos_tui_wallet/store.json`
-
-### Buenas prácticas
-
-✅ **Hacer:**
-- Usa contraseñas fuertes (12+ caracteres)
-- Haz backup regular de tu frase semilla
-- Guarda la semilla offline y segura
-- Prueba envíos en Ghostnet primero
-
-❌ **No hacer:**
-- No compartas tu frase semilla
-- No guardes la semilla en texto plano digital
-- No uses la misma contraseña en múltiples lugares
-- No ignores advertencias de red
+- The last 5 transactions are shown automatically
+- Press `m` to view full history
+- Use `↑/↓` to navigate
+- Press `Enter` to view transaction details
+- Click on hash to open in TzKT explorer
 
 ---
 
-## 📊 Arquitectura
+## 🔒 Security
 
-### Estructura del proyecto
+### Encryption
+
+- **Algorithm**: AES-256-GCM
+- **Key Derivation**: Argon2id (GPU/ASIC resistant)
+- **Storage**: `~/.config/tezos_tui_wallet/store.json`
+
+### Best Practices
+
+✅ **Do:**
+- Use strong passwords (12+ characters)
+- Make regular backups of your seed phrase
+- Store seed offline and secure
+- Test sends on Ghostnet first
+
+❌ **Don't:**
+- Don't share your seed phrase
+- Don't store seed in plain text digitally
+- Don't use the same password in multiple places
+- Don't ignore network warnings
+
+---
+
+## 📊 Architecture
+
+### Project Structure
 
 ```
 sassy-wallet/
-├── app.py                      # Aplicación principal (UI + lógica)
+├── app.py                      # Main application (UI + logic)
 ├── wallet/
-│   ├── crypto.py              # Cifrado AES-256
-│   ├── logger.py              # Sistema de logging estructurado
-│   ├── store.py               # Persistencia de datos
-│   └── tezos.py               # Interacción con blockchain
-├── bakery_messages.py         # Mensajes dinámicos para operaciones
-├── staking_messages.py        # Mensajes motivacionales de staking (CHAD/BORING/LAZY)
-├── balance_messages.py        # Mensajes según tier de balance
-├── empty_wallet_messages.py   # Mensajes para wallets vacías
+│   ├── crypto.py              # AES-256 encryption
+│   ├── logger.py              # Structured logging system
+│   ├── store.py               # Data persistence
+│   └── tezos.py               # Blockchain interaction
+├── bakery_messages.py         # Dynamic messages for operations
+├── staking_messages.py        # Motivational staking messages (CHAD/BORING/LAZY)
+├── balance_messages.py        # Messages based on balance tier
+├── empty_wallet_messages.py   # Messages for empty wallets
 ├── logs/
-│   └── wallet.log             # Logs de depuración
-├── test_*.py                  # Tests de validación
-├── FONTS.md                   # Guía de configuración de fuentes
-├── REFACTORING_SUMMARY.md     # Documentación técnica
-└── README.md                  # Este archivo
+│   └── wallet.log             # Debug logs
+├── test_*.py                  # Validation tests
+└── README.md                  # This file
 ```
 
-### Dependencias principales
+### Main Dependencies
 
-- **Textual**: Framework TUI moderno
-- **PyTezos**: Cliente de Tezos para Python
-- **Cryptography**: Cifrado AES-256
-- **Argon2-cffi**: Key derivation segura
+- **Textual**: Modern TUI framework
+- **PyTezos**: Tezos client for Python
+- **Cryptography**: AES-256 encryption
+- **Argon2-cffi**: Secure key derivation
 
 ---
 
 ## 🧪 Testing
 
-### Ejecutar tests automatizados
+### Run Automated Tests
 
 ```bash
-# Todos los tests (37 tests)
+# All tests (37 tests)
 python3 test_all_phases.py
 
-# Tests individuales
+# Individual tests
 python3 test_phase1_complete.py  # Logging
 python3 test_phase2_complete.py  # Thread safety
 python3 test_phase3_complete.py  # Timeouts
@@ -212,133 +208,132 @@ python3 test_phase4_complete.py  # Type hints
 python3 test_phase5_complete.py  # Constants
 ```
 
-### Testing manual (Ghostnet)
+### Manual Testing (Ghostnet)
 
-Ver [REFACTORING_SUMMARY.md](REFACTORING_SUMMARY.md) sección "Deployment Checklist" para checklist completo.
+Use Ghostnet for testing before using on Mainnet. Press `n` to switch networks.
 
 ---
 
-## 📝 Logs y Debugging
+## 📝 Logs and Debugging
 
-Los logs se guardan en `logs/wallet.log` con rotación automática (max 10MB).
+Logs are saved in `logs/wallet.log` with automatic rotation (max 10MB).
 
 ```bash
-# Ver logs en tiempo real
+# View logs in real-time
 tail -f logs/wallet.log
 
-# Ver últimas líneas
+# View last lines
 tail -50 logs/wallet.log
 
-# Buscar errores
+# Search errors
 grep ERROR logs/wallet.log
 ```
 
-**Nota:** Los logs contienen información detallada de debugging pero NUNCA incluyen claves privadas ni contraseñas.
+**Note:** Logs contain detailed debugging information but NEVER include private keys or passwords.
 
 ---
 
-## 🐛 Solución de Problemas
+## 🐛 Troubleshooting
 
-### App no inicia
+### App Won't Start
 
 ```bash
-# Verificar dependencias
+# Verify dependencies
 pip install -r requirements.txt
 
-# Verificar Python
-python3 --version  # Debe ser 3.10+
+# Verify Python
+python3 --version  # Must be 3.10+
 
-# Ver logs
+# View logs
 cat logs/wallet.log
 ```
 
-### Error de conexión RPC
+### RPC Connection Error
 
-- Verifica tu conexión a internet
-- Cambia de red: presiona `n`
-- Espera y reintenta: los RPCs públicos pueden estar ocupados
+- Check your internet connection
+- Change network: press `n`
+- Wait and retry: public RPCs can be busy
 
-### Balance no actualiza
+### Balance Not Updating
 
-- Presiona `F5` para forzar refresh
-- Verifica que estés en la red correcta
-- Los cambios pueden tardar 30 segundos en aparecer
+- Press `F5` to force refresh
+- Verify you're on the correct network
+- Changes may take 30 seconds to appear
 
-### Transacción no aparece
+### Transaction Not Showing
 
-- Las transacciones tardan ~30 segundos en confirmarse
-- Presiona `m` para ver historial completo
-- Verifica en TzKT explorer (click en hash)
+- Transactions take ~30 seconds to confirm
+- Press `m` to view full history
+- Check on TzKT explorer (click on hash)
 
 ---
 
-## 🤝 Contribuir
+## 🤝 Contributing
 
-### Reportar bugs
+### Report Bugs
 
-1. Verifica que sea reproducible
-2. Incluye `logs/wallet.log` (revisa que no tenga info sensible)
-3. Describe pasos para reproducir
-4. Incluye tu versión de Python y OS
+1. Verify it's reproducible
+2. Include `logs/wallet.log` (check for sensitive info)
+3. Describe steps to reproduce
+4. Include your Python and OS version
 
-### Desarrollo
+### Development
 
 ```bash
-# Clonar repositorio
-git clone <repo-url>
+# Clone repository
+git clone https://github.com/BakingLiberteZ/tui-tezos-wallet.git
 cd tui-tezos-wallet
 
-# Instalar dependencias
+# Install dependencies
 pip install -r requirements.txt
 
-# Ejecutar tests
+# Run tests
 python3 test_all_phases.py
 
-# Hacer cambios...
+# Make changes...
 
-# Verificar que tests pasen
+# Verify tests pass
 python3 test_all_phases.py
 ```
 
 ---
 
-## 📄 Licencia
+## 📄 License
 
-MIT License - Ver archivo LICENSE para detalles.
-
----
-
-## 🙏 Créditos
-
-- **PyTezos**: Cliente de Tezos para Python
-- **Textual**: Framework TUI por Textualize
-- **IBM Plex**: Fuente retro por IBM
-- **TzKT**: API de blockchain explorer
+MIT License - See LICENSE file for details.
 
 ---
 
-## 🔗 Links Útiles
+## 🙏 Credits
 
-- [Documentación de Tezos](https://tezos.com/developers/)
+- **PyTezos**: Tezos client for Python
+- **Textual**: TUI framework by Textualize
+- **IBM Plex**: Retro font by IBM
+- **TzKT**: Blockchain explorer API
+
+---
+
+## 🔗 Useful Links
+
+- [Tezos Documentation](https://tezos.com/developers/)
 - [TzKT Explorer](https://tzkt.io/)
 - [Textual Framework](https://textual.textualize.io/)
 - [PyTezos Docs](https://pytezos.org/)
 
 ---
 
-## 📞 Soporte
+## 📞 Support
 
-Para soporte, por favor:
-1. Revisa [REFACTORING_SUMMARY.md](REFACTORING_SUMMARY.md)
-2. Consulta [FONTS.md](FONTS.md) para problemas de fuentes
-3. Revisa logs en `logs/wallet.log`
-4. Abre un issue con detalles completos
+For support, please:
+1. Check the logs in `logs/wallet.log`
+2. Review existing GitHub issues
+3. Open a new issue with complete details
 
 ---
 
-**💅 ¡Disfruta tu Sassy Wallet con actitud!**
+**💅 Enjoy your Sassy Wallet with attitude!**
 
 *"A wallet with an attitude"* 💅
 
-Generado: 2026-01-22
-Versión: 1.3.0
+Generated: 2026-01-22
+Version: 1.3.0
