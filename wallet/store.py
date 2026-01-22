@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, TypedDict
 
 from .crypto import EncryptedBlob
+from .logger import log_error
 
 DEFAULT_PATH = Path("data/wallet.json")
 
@@ -33,7 +34,8 @@ def _default_store() -> Dict[str, Any]:
     return {
         "rpc": "https://ghostnet.tezos.marigold.dev",
         "accounts": [],
-        "recent_to": [],
+        "recent_to": [],  # Legacy, kept for backwards compatibility
+        "recent_to_by_wallet": {},  # New: per-wallet recent destinations
         "tx_prefs": {
             "advanced": False,
             "fee_xtz": "",
@@ -65,8 +67,8 @@ def load_store(path: Path = DEFAULT_PATH) -> Dict[str, Any]:
         backup = path.with_suffix(".json.bak")
         try:
             backup.write_text(raw, encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            log_error("Failed to write backup file for corrupted store", exception=e, backup_path=str(backup))
         data = _default_store()
         save_store(data, path=path)
         return data
@@ -80,12 +82,16 @@ def load_store(path: Path = DEFAULT_PATH) -> Dict[str, Any]:
     if "accounts" not in data or not isinstance(data["accounts"], list):
         data["accounts"] = []
 
-    # Recents
+    # Recents (legacy)
     if "recent_to" not in data or not isinstance(data.get("recent_to"), list):
         data["recent_to"] = []
     else:
         # limpiar entradas raras / vacías
         data["recent_to"] = [str(x).strip() for x in data["recent_to"] if str(x).strip()]
+
+    # Recents by wallet (new structure)
+    if "recent_to_by_wallet" not in data or not isinstance(data.get("recent_to_by_wallet"), dict):
+        data["recent_to_by_wallet"] = {}
 
     # Tx prefs
     if "tx_prefs" not in data or not isinstance(data.get("tx_prefs"), dict):

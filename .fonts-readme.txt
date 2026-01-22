@@ -1,0 +1,46 @@
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ⚠️  IMPORTANTE: Cómo Funcionan las Fuentes en Apps TUI  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+Las aplicaciones TUI (Terminal User Interface) NO pueden cambiar 
+la fuente por sí mismas. La fuente se controla desde tu terminal.
+
+┌─────────────────────────────────────────────────────────────┐
+│  ✅ CORRECTO: Configurar fuente en la TERMINAL             │
+│  ❌ INCORRECTO: Intentar configurar fuente en la app       │
+└─────────────────────────────────────────────────────────────┘
+
+PASOS PARA CAMBIAR LA FUENTE:
+──────────────────────────────
+
+1. Instalar fuentes recomendadas:
+   ./install_retro_fonts.sh
+
+2. Configurar tu TERMINAL (no la app):
+   - GNOME Terminal: Preferencias → Perfil → Texto → Fuente
+   - Kitty: ~/.config/kitty/kitty.conf → font_family
+   - Alacritty: ~/.config/alacritty/alacritty.yml → font
+
+3. Reiniciar la terminal
+
+4. Ejecutar: python3 app.py
+
+La app heredará automáticamente la fuente de tu terminal.
+
+FUENTES RECOMENDADAS:
+─────────────────────
+
+⭐ JetBrains Mono (como Claude Terminal)
+   - Moderna, limpia, perfecta legibilidad
+   - Tamaño: 11-12pt
+
+🔧 IBM Plex Mono (retro auténtico)
+   - Estilo IBM terminal años 80/90
+   - Tamaño: 11pt
+
+👾 VT323 (vintage terminal)
+   - Simula terminales VT antiguos
+   - Tamaño: 13pt (necesita ser más grande)
+
+Para más información: cat FONTS.md
+

@@ -1,4 +1,4 @@
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 from decimal import Decimal
 import json
 import urllib.request
@@ -10,14 +10,150 @@ import time
 from pytezos import pytezos
 from pytezos.crypto.key import Key
 
+from .logger import safe_log_exception, log_error
 
-def get_client(rpc: str, key: Optional[Key] = None):
+
+def get_client(rpc: str, key: Optional[Key] = None) -> Any:
+    """Get PyTezos client instance. Returns pytezos client object."""
     return pytezos.using(shell=rpc, key=key)
+
+
+def get_counter(rpc: str, address: str) -> int:
+    """
+    Get the current counter for an address directly from RPC.
+    This is the counter value to use for the NEXT operation.
+    """
+    client = get_client(rpc)
+    counter_str = client.shell.contracts[address].counter()
+    # The counter() call returns the last used counter, so we need to increment by 1
+    return int(counter_str) + 1
+
+
+def check_pending_operations(rpc: str, address: str) -> Optional[dict]:
+    """
+    Check if there are pending operations for an address in the mempool.
+
+    Returns:
+        dict with 'has_pending', 'pending_count', 'operations' if pending ops found
+        None if no pending operations
+    """
+    try:
+        # Get pending operations from mempool
+        client = get_client(rpc)
+
+        # Try to get pending operations from the mempool
+        # The mempool contains operations that have been submitted but not yet included in a block
+        try:
+            pending_ops = client.shell.mempool.pending_operations()
+        except Exception:
+            # Some RPCs don't expose mempool, return None
+            return None
+
+        if not pending_ops:
+            return None
+
+        # Look for operations from this address
+        user_pending_ops = []
+
+        # Check in 'applied' (waiting to be included)
+        if isinstance(pending_ops, dict) and 'applied' in pending_ops:
+            for op in pending_ops['applied']:
+                try:
+                    # Check if this operation is from our address
+                    if isinstance(op, dict) and 'contents' in op:
+                        for content in op['contents']:
+                            if isinstance(content, dict):
+                                source = content.get('source', '')
+                                if source == address:
+                                    user_pending_ops.append({
+                                        'hash': op.get('hash', 'unknown'),
+                                        'kind': content.get('kind', 'unknown'),
+                                        'counter': content.get('counter', 'unknown'),
+                                    })
+                except Exception:
+                    continue
+
+        # Check in 'unprocessed' (waiting to be validated)
+        if isinstance(pending_ops, dict) and 'unprocessed' in pending_ops:
+            for op in pending_ops['unprocessed']:
+                try:
+                    if isinstance(op, dict) and 'contents' in op:
+                        for content in op['contents']:
+                            if isinstance(content, dict):
+                                source = content.get('source', '')
+                                if source == address:
+                                    user_pending_ops.append({
+                                        'hash': op.get('hash', 'unknown'),
+                                        'kind': content.get('kind', 'unknown'),
+                                        'counter': content.get('counter', 'unknown'),
+                                        'status': 'unprocessed'
+                                    })
+                except Exception:
+                    continue
+
+        if user_pending_ops:
+            return {
+                'has_pending': True,
+                'pending_count': len(user_pending_ops),
+                'operations': user_pending_ops,
+            }
+
+        return None
+
+    except Exception as e:
+        log_error("Failed to check pending operations", exception=e)
+        return None
 
 
 def get_balance_mutez(rpc: str, address: str) -> int:
     client = get_client(rpc)
     return int(client.shell.contracts[address].balance())
+
+
+@safe_log_exception(default_return=None, user_message="Failed to get delegation info")
+def get_delegation_info(rpc: str, address: str) -> Optional[str]:
+    """
+    Get the baker address this account is delegated to.
+    Returns None if not delegated.
+    """
+    base = _tzkt_base_from_rpc(rpc)
+    url = f"{base}/v1/accounts/{address}"
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "sassy-wallet/1.3.0"},
+        method="GET",
+    )
+    data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+
+    # Check if delegated
+    delegate = data.get("delegate")
+    if delegate and isinstance(delegate, dict):
+        delegate_address = delegate.get("address")
+        return delegate_address if delegate_address else None
+
+    return None
+
+
+@safe_log_exception(default_return=0, user_message="Failed to get staking balance")
+def get_staking_balance(rpc: str, address: str) -> int:
+    """
+    Get the staking balance (staked amount) for this account in mutez.
+    Returns 0 if not staking or if information is unavailable.
+    """
+    base = _tzkt_base_from_rpc(rpc)
+    url = f"{base}/v1/accounts/{address}"
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "sassy-wallet/1.3.0"},
+        method="GET",
+    )
+    data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+
+    # Get staked balance (if available)
+    staked_balance = data.get("stakedBalance", 0)
+    return int(staked_balance) if staked_balance else 0
 
 
 def mutez_to_xtz(m: int) -> Decimal:
@@ -35,14 +171,16 @@ def key_from_encoded_secret(encoded: str) -> Key:
 def _contains_unrevealed_key(err: Any) -> bool:
     try:
         s = str(err)
-    except Exception:
+    except Exception as e:
+        log_error("Failed to convert error to string", exception=e)
         s = ""
     if "unrevealed_key" in s:
         return True
 
     try:
         r = repr(err)
-    except Exception:
+    except Exception as e:
+        log_error("Failed to get repr of error", exception=e)
         r = ""
     return "unrevealed_key" in r
 
@@ -54,10 +192,10 @@ def _tzkt_base_from_rpc(rpc: str) -> str:
     return "https://api.tzkt.io"
 
 
-def _urlopen_json_with_retries(req: urllib.request.Request, timeout: int = 15, retries: int = 3) -> Any:
+def _urlopen_json_with_retries(req: urllib.request.Request, timeout: int = 15, retries: int = 3) -> Dict[str, Any]:
     """
     Fetch JSON via urllib with a few retries to smooth out transient TLS/EOF issues.
-    Returns parsed JSON (dict/list).
+    Returns parsed JSON (typically a dict).
     """
     ctx = ssl.create_default_context()
     last_err: Exception | None = None
@@ -68,17 +206,23 @@ def _urlopen_json_with_retries(req: urllib.request.Request, timeout: int = 15, r
             return json.loads(data)
         except (ssl.SSLError, urllib.error.URLError, ConnectionError, TimeoutError) as e:
             last_err = e
+            log_error(f"Network error on attempt {attempt}/{retries}", exception=e, url=req.full_url)
             if attempt >= retries:
                 break
             # small backoff
             time.sleep(0.4 * attempt)
         except Exception as e:
             # non-network errors: don't spin
+            log_error("Non-network error in URL fetch", exception=e, url=req.full_url)
             raise
-    raise last_err if last_err else RuntimeError("Failed to fetch JSON")
+    if last_err:
+        log_error("All retry attempts exhausted", exception=last_err, url=req.full_url)
+        raise last_err
+    else:
+        raise RuntimeError("Failed to fetch JSON")
 
 
-def get_xtz_history(rpc: str, address: str, limit: int = 20) -> list[dict]:
+def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, Any]]:
     base = _tzkt_base_from_rpc(rpc)
     endpoint = f"{base}/v1/operations/transactions"
 
@@ -93,7 +237,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> list[dict]:
 
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "tui-tezos-wallet/0.1"},
+        headers={"User-Agent": "sassy-wallet/1.3.0"},
         method="GET",
     )
     items = _urlopen_json_with_retries(req, timeout=15, retries=3)
@@ -131,45 +275,43 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> list[dict]:
 # Fee/Gas estimation helpers (for UI confirm screen)
 # ---------------------------------------------------------------------
 
+@safe_log_exception(default_return=False, user_message="Failed to check if account is revealed")
 def is_revealed(rpc: str, address: str) -> bool:
     """
     True si la cuenta tz* tiene manager_key revelada.
     """
     client = get_client(rpc)
-    try:
-        mk = client.shell.contracts[address].manager_key()
-        if mk is None:
-            return False
-        if isinstance(mk, str):
-            return bool(mk)
-        if isinstance(mk, dict):
-            return bool(mk.get("key"))
-        return bool(mk)
-    except Exception:
-        # Conservador: si no podemos chequear, asumimos que NO está revelada
+    mk = client.shell.contracts[address].manager_key()
+    if mk is None:
         return False
+    if isinstance(mk, str):
+        return bool(mk)
+    if isinstance(mk, dict):
+        return bool(mk.get("key"))
+    return bool(mk)
 
 
+@safe_log_exception(
+    default_return={"fee_mutez": 0, "gas_limit": 0, "storage_limit": 0},
+    user_message="Failed to extract limits from operation"
+)
 def _extract_limits_from_op(op) -> Dict[str, int]:
     """
     op: OperationGroup ya autofilled
     Retorna: fee_mutez, gas_limit, storage_limit
     """
-    try:
-        payload = op.json_payload()
-        contents = []
-        if isinstance(payload, list) and payload:
-            contents = (payload[0] or {}).get("contents", []) or []
-        elif isinstance(payload, dict):
-            contents = payload.get("contents", []) or []
+    payload = op.json_payload()
+    contents = []
+    if isinstance(payload, list) and payload:
+        contents = (payload[0] or {}).get("contents", []) or []
+    elif isinstance(payload, dict):
+        contents = payload.get("contents", []) or []
 
-        c0 = contents[0] if contents else {}
-        fee = int(c0.get("fee") or 0)
-        gas = int(c0.get("gas_limit") or 0)
-        storage = int(c0.get("storage_limit") or 0)
-        return {"fee_mutez": fee, "gas_limit": gas, "storage_limit": storage}
-    except Exception:
-        return {"fee_mutez": 0, "gas_limit": 0, "storage_limit": 0}
+    c0 = contents[0] if contents else {}
+    fee = int(c0.get("fee") or 0)
+    gas = int(c0.get("gas_limit") or 0)
+    storage = int(c0.get("storage_limit") or 0)
+    return {"fee_mutez": fee, "gas_limit": gas, "storage_limit": storage}
 
 
 def estimate_send_xtz(
@@ -177,7 +319,7 @@ def estimate_send_xtz(
     key: Key,
     to_addr: str,
     amount_xtz: Decimal,
-) -> Dict[str, Any]:
+) -> Dict[str, Any]:  # Contains: from, to, amount_xtz, reveal_needed, reveal, tx, etc.
     """
     Estima parámetros sugeridos para:
       - reveal (si aplica)
@@ -205,13 +347,15 @@ def estimate_send_xtz(
         try:
             rev_op = client.reveal().autofill()
             reveal_info = _extract_limits_from_op(rev_op)
-        except Exception:
+        except Exception as e:
+            log_error("Failed to estimate reveal operation", exception=e, address=from_addr)
             reveal_info = {"fee_mutez": 0, "gas_limit": 0, "storage_limit": 0}
 
     try:
         tx_op = client.transaction(destination=to_addr, amount=amount_xtz).autofill()
         tx_info = _extract_limits_from_op(tx_op)
-    except Exception:
+    except Exception as e:
+        log_error("Failed to estimate transaction operation", exception=e, from_addr=from_addr, to_addr=to_addr)
         tx_info = {"fee_mutez": 0, "gas_limit": 0, "storage_limit": 0}
 
     # Some RPCs / pytezos versions may return 0s for fee/gas/storage on autofill.
@@ -262,11 +406,11 @@ def estimate_send_xtz(
         "reveal_needed": reveal_needed,
         "reveal": reveal_info if reveal_needed else None,
         "tx": tx_info,
-      "reveal_fee_mutez": reveal_fee_mutez,
-      "tx_fee_mutez": tx_fee_mutez,
+        "reveal_fee_mutez": reveal_fee_mutez,
+        "tx_fee_mutez": tx_fee_mutez,
         "total_fee_mutez": total_fee_mutez,
         "total_fee_xtz": mutez_to_xtz(total_fee_mutez),
-      "fee_options": fee_options,
+        "fee_options": fee_options,
     }
 
 
@@ -459,4 +603,361 @@ def send_xtz(
             return _inject(_build_tx_op(), kind='tx')
         except Exception as send_e:
             raise RuntimeError(f"Send failed after reveal ({reveal_oph}): {send_e}") from send_e
+
+
+def delegate_to_baker(rpc: str, key: Key, baker_address: str) -> str:
+    """
+    Delegate to a baker.
+
+    Args:
+        rpc: RPC endpoint
+        key: Account private key
+        baker_address: Baker's address (tz1/tz2/tz3/tz4)
+
+    Returns:
+        Operation hash (op...)
+    """
+    def _is_counter_error(e: Exception) -> bool:
+        """Check if error is related to counter mismatch."""
+        error_str = str(e).lower()
+        return "counter" in error_str and ("not yet reached" in error_str or "already used" in error_str)
+
+    def _inject_with_retry(max_retries: int = 3):
+        """Build, autofill, sign, and inject with counter error retry logic."""
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                # IMPORTANT: Create a completely fresh client on each attempt
+                # This ensures we get the latest counter from the blockchain
+                fresh_client = get_client(rpc, key=key)
+
+                # Get counter directly from RPC to avoid cache issues
+                address = key.public_key_hash()
+                try:
+                    current_counter = get_counter(rpc, address)
+                    log_error(f"Attempt {attempt + 1}: Using counter {current_counter} for address {address}")
+                except Exception as counter_e:
+                    log_error(f"Failed to get counter manually, will rely on autofill", exception=counter_e)
+                    current_counter = None
+
+                # Build delegation operation
+                op = fresh_client.delegation(baker_address)
+
+                # If we got a manual counter, set it explicitly before autofill
+                if current_counter is not None:
+                    try:
+                        # Use with_amount() to access the operation internals and set counter
+                        # PyTezos operations have a counter property we can set
+                        op = op.using(counter=current_counter)
+                    except Exception as set_counter_e:
+                        log_error(f"Failed to set counter manually, continuing with autofill", exception=set_counter_e)
+
+                # Autofill (fetches gas, fees, storage limit)
+                try:
+                    op = op.autofill()
+                except Exception as e:
+                    # If autofill fails, try with fill
+                    try:
+                        op = op.fill()
+                    except Exception:
+                        raise RuntimeError(f"Failed to prepare operation: {e}") from e
+
+                # Sign and inject
+                op = op.sign()
+                result = op.inject()
+
+                # Normalize result
+                if isinstance(result, dict):
+                    return result.get("hash", str(result))
+                return str(result)
+
+            except Exception as e:
+                last_error = e
+                # Check if it's a counter error and we have retries left
+                if _is_counter_error(e) and attempt < max_retries:
+                    # Exponential backoff: wait longer on each retry
+                    wait_time = 3.0 * (attempt + 1)  # 3s, 6s, 9s (increased from 2s)
+                    log_error(f"Counter error on attempt {attempt + 1}, waiting {wait_time}s before retry", exception=e)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # Not a counter error or out of retries
+                    raise last_error
+
+    try:
+        return _inject_with_retry()
+    except Exception as e:
+        if not _contains_unrevealed_key(e):
+            raise
+
+        # Reveal first (also with retry logic)
+        def _inject_reveal_with_retry(max_retries: int = 3):
+            last_error = None
+            for attempt in range(max_retries + 1):
+                try:
+                    fresh_client = get_client(rpc, key=key)
+
+                    # Get counter manually for reveal
+                    address = key.public_key_hash()
+                    try:
+                        current_counter = get_counter(rpc, address)
+                        log_error(f"Reveal attempt {attempt + 1}: Using counter {current_counter}")
+                    except Exception as counter_e:
+                        log_error(f"Failed to get counter for reveal, will rely on autofill", exception=counter_e)
+                        current_counter = None
+
+                    op = fresh_client.reveal()
+
+                    # Set counter manually if we got it
+                    if current_counter is not None:
+                        try:
+                            op = op.using(counter=current_counter)
+                        except Exception as set_counter_e:
+                            log_error(f"Failed to set counter for reveal", exception=set_counter_e)
+
+                    try:
+                        op = op.autofill()
+                    except Exception as e:
+                        try:
+                            op = op.fill()
+                        except Exception:
+                            raise RuntimeError(f"Failed to prepare reveal: {e}") from e
+                    op = op.sign()
+                    result = op.inject()
+                    if isinstance(result, dict):
+                        return result.get("hash", str(result))
+                    return str(result)
+                except Exception as e:
+                    last_error = e
+                    if _is_counter_error(e) and attempt < max_retries:
+                        wait_time = 3.0 * (attempt + 1)  # Increased wait time
+                        log_error(f"Counter error on reveal attempt {attempt + 1}, waiting {wait_time}s", exception=e)
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise last_error
+
+        try:
+            reveal_oph = _inject_reveal_with_retry()
+        except Exception as rev_e:
+            raise RuntimeError(f"Reveal failed: {rev_e}") from rev_e
+
+        # Wait longer for reveal to propagate
+        log_error(f"Reveal successful ({reveal_oph}), waiting 6s for propagation")
+        time.sleep(6)
+
+        # Retry delegation with fresh client
+        try:
+            return _inject_with_retry()
+        except Exception as del_e:
+            raise RuntimeError(f"Delegation failed after reveal ({reveal_oph}): {del_e}") from del_e
+
+
+def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
+    """
+    Stake XTZ with the current baker.
+    Account must already be delegated.
+
+    Args:
+        rpc: RPC endpoint
+        key: Account private key
+        amount_xtz: Amount to stake in XTZ
+
+    Returns:
+        Operation hash (op...)
+    """
+    def _is_counter_error(e: Exception) -> bool:
+        """Check if error is related to counter mismatch."""
+        error_str = str(e).lower()
+        return "counter" in error_str and ("not yet reached" in error_str or "already used" in error_str)
+
+    def _inject_with_retry(max_retries: int = 3):
+        """Build, autofill, sign, and inject with counter error retry logic."""
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                # Create completely fresh client on each attempt
+                fresh_client = get_client(rpc, key=key)
+                op = fresh_client.stake(amount_xtz)
+
+                # Autofill
+                try:
+                    op = op.autofill()
+                except Exception as e:
+                    try:
+                        op = op.fill()
+                    except Exception:
+                        raise RuntimeError(f"Failed to prepare operation: {e}") from e
+
+                # Sign and inject
+                op = op.sign()
+                result = op.inject()
+
+                if isinstance(result, dict):
+                    return result.get("hash", str(result))
+                return str(result)
+
+            except Exception as e:
+                last_error = e
+                if _is_counter_error(e) and attempt < max_retries:
+                    wait_time = 2.0 * (attempt + 1)
+                    log_error(f"Counter error on stake attempt {attempt + 1}, waiting {wait_time}s", exception=e)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise last_error
+
+    try:
+        return _inject_with_retry()
+    except Exception as e:
+        if not _contains_unrevealed_key(e):
+            raise
+
+        # Reveal with retry
+        def _inject_reveal_with_retry(max_retries: int = 3):
+            last_error = None
+            for attempt in range(max_retries + 1):
+                try:
+                    fresh_client = get_client(rpc, key=key)
+                    op = fresh_client.reveal()
+                    try:
+                        op = op.autofill()
+                    except Exception as e:
+                        try:
+                            op = op.fill()
+                        except Exception:
+                            raise RuntimeError(f"Failed to prepare reveal: {e}") from e
+                    op = op.sign()
+                    result = op.inject()
+                    if isinstance(result, dict):
+                        return result.get("hash", str(result))
+                    return str(result)
+                except Exception as e:
+                    last_error = e
+                    if _is_counter_error(e) and attempt < max_retries:
+                        wait_time = 2.0 * (attempt + 1)
+                        log_error(f"Counter error on reveal attempt {attempt + 1}, waiting {wait_time}s", exception=e)
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise last_error
+
+        try:
+            reveal_oph = _inject_reveal_with_retry()
+        except Exception as rev_e:
+            raise RuntimeError(f"Reveal failed: {rev_e}") from rev_e
+
+        log_error(f"Reveal successful ({reveal_oph}), waiting 6s for propagation")
+        time.sleep(6)
+
+        try:
+            return _inject_with_retry()
+        except Exception as stake_e:
+            raise RuntimeError(f"Stake failed after reveal ({reveal_oph}): {stake_e}") from stake_e
+
+
+def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
+    """
+    Unstake XTZ from the current baker.
+    Account must be staking.
+
+    Args:
+        rpc: RPC endpoint
+        key: Account private key
+        amount_xtz: Amount to unstake in XTZ
+
+    Returns:
+        Operation hash (op...)
+    """
+    def _is_counter_error(e: Exception) -> bool:
+        """Check if error is related to counter mismatch."""
+        error_str = str(e).lower()
+        return "counter" in error_str and ("not yet reached" in error_str or "already used" in error_str)
+
+    def _inject_with_retry(max_retries: int = 3):
+        """Build, autofill, sign, and inject with counter error retry logic."""
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                # Create completely fresh client on each attempt
+                fresh_client = get_client(rpc, key=key)
+                op = fresh_client.unstake(amount_xtz)
+
+                # Autofill
+                try:
+                    op = op.autofill()
+                except Exception as e:
+                    try:
+                        op = op.fill()
+                    except Exception:
+                        raise RuntimeError(f"Failed to prepare operation: {e}") from e
+
+                # Sign and inject
+                op = op.sign()
+                result = op.inject()
+
+                if isinstance(result, dict):
+                    return result.get("hash", str(result))
+                return str(result)
+
+            except Exception as e:
+                last_error = e
+                if _is_counter_error(e) and attempt < max_retries:
+                    wait_time = 2.0 * (attempt + 1)
+                    log_error(f"Counter error on unstake attempt {attempt + 1}, waiting {wait_time}s", exception=e)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise last_error
+
+    try:
+        return _inject_with_retry()
+    except Exception as e:
+        if not _contains_unrevealed_key(e):
+            raise
+
+        # Reveal with retry
+        def _inject_reveal_with_retry(max_retries: int = 3):
+            last_error = None
+            for attempt in range(max_retries + 1):
+                try:
+                    fresh_client = get_client(rpc, key=key)
+                    op = fresh_client.reveal()
+                    try:
+                        op = op.autofill()
+                    except Exception as e:
+                        try:
+                            op = op.fill()
+                        except Exception:
+                            raise RuntimeError(f"Failed to prepare reveal: {e}") from e
+                    op = op.sign()
+                    result = op.inject()
+                    if isinstance(result, dict):
+                        return result.get("hash", str(result))
+                    return str(result)
+                except Exception as e:
+                    last_error = e
+                    if _is_counter_error(e) and attempt < max_retries:
+                        wait_time = 2.0 * (attempt + 1)
+                        log_error(f"Counter error on reveal attempt {attempt + 1}, waiting {wait_time}s", exception=e)
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise last_error
+
+        try:
+            reveal_oph = _inject_reveal_with_retry()
+        except Exception as rev_e:
+            raise RuntimeError(f"Reveal failed: {rev_e}") from rev_e
+
+        log_error(f"Reveal successful ({reveal_oph}), waiting 6s for propagation")
+        time.sleep(6)
+
+        try:
+            return _inject_with_retry()
+        except Exception as unstake_e:
+            raise RuntimeError(f"Unstake failed after reveal ({reveal_oph}): {unstake_e}") from unstake_e
 

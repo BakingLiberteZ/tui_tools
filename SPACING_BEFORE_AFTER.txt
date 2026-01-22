@@ -1,0 +1,204 @@
+═══════════════════════════════════════════════════════════════
+  WALLET DETAILS SPACING - BEFORE & AFTER COMPARISON
+═══════════════════════════════════════════════════════════════
+
+BEFORE (Cramped):
+┌─────────────────────────────────────────┐
+│ ACCOUNTS                    [+ Add (a)] │
+│ ┌─────────────────────────────────────┐ │
+│ │ • Alice Main Wallet                 │ │
+│ │   Bob Savings                       │ │
+│ │   Charlie Trading                   │ │
+│ └─────────────────────────────────────┘ │
+│                                         │
+│ Alice Main Wallet                       │ ← No space below
+│ Address: tz1abc123de…fgh890xyz          │ ← No space below
+│ Balance: 12.456789 XTZ                  │ ← No space below
+│ Network: mainnet                        │
+│                                         │
+│ [Send (s)] [Receive (x)] [Refresh (r)] │
+└─────────────────────────────────────────┘
+     ↑
+     Lines are too close together
+     Hard to distinguish between different info
+     Text feels cramped and cluttered
+
+
+AFTER (Spacious):
+┌─────────────────────────────────────────┐
+│ ACCOUNTS                    [+ Add (a)] │
+│ ┌─────────────────────────────────────┐ │
+│ │ • Alice Main Wallet                 │ │
+│ │   Bob Savings                       │ │
+│ │   Charlie Trading                   │ │
+│ └─────────────────────────────────────┘ │
+│                                         │
+│ Alice Main Wallet                       │
+│                                         │ ← Added space!
+│ Address: tz1abc123de…fgh890xyz          │
+│                                         │ ← Added space!
+│ Balance: 12.456789 XTZ                  │
+│                                         │ ← Added space!
+│ Network: mainnet                        │
+│                                         │
+│ [Send (s)] [Receive (x)] [Refresh (r)] │
+└─────────────────────────────────────────┘
+     ↑
+     Each line has breathing room
+     Easy to scan and find information
+     Clean, professional appearance
+
+
+═══════════════════════════════════════════════════════════════
+  DETAILED COMPARISON - LINE BY LINE
+═══════════════════════════════════════════════════════════════
+
+Line 1: Wallet Name
+-------------------
+BEFORE: │ Alice Main Wallet                       │
+        │ Address: tz1abc...                      │
+          ↑ Too close!
+
+AFTER:  │ Alice Main Wallet                       │
+        │                                         │ ← Space added
+        │ Address: tz1abc...                      │
+          ↑ Much better!
+
+
+Line 2: Address
+---------------
+BEFORE: │ Address: tz1abc123de…fgh890xyz          │
+        │ Balance: 12.456789 XTZ                  │
+          ↑ Too close!
+
+AFTER:  │ Address: tz1abc123de…fgh890xyz          │
+        │                                         │ ← Space added
+        │ Balance: 12.456789 XTZ                  │
+          ↑ Much better!
+
+
+Line 3: Balance
+---------------
+BEFORE: │ Balance: 12.456789 XTZ                  │
+        │ Network: mainnet                        │
+          ↑ Too close!
+
+AFTER:  │ Balance: 12.456789 XTZ                  │
+        │                                         │ ← Space added
+        │ Network: mainnet                        │
+          ↑ Much better!
+
+
+Line 4: Network
+---------------
+BEFORE: │ Network: mainnet                        │
+        │                                         │
+        │ [Send (s)] [Receive (x)] [Refresh (r)] │
+          ↑ Okay spacing (before action buttons)
+
+AFTER:  │ Network: mainnet                        │
+        │                                         │
+        │ [Send (s)] [Receive (x)] [Refresh (r)] │
+          ↑ Same spacing (no change needed)
+
+
+═══════════════════════════════════════════════════════════════
+  WATCH-ONLY WALLET EXAMPLE
+═══════════════════════════════════════════════════════════════
+
+BEFORE (Cramped):
+┌─────────────────────────────────────────┐
+│ Cold Storage (watch-only)               │
+│ Address: tz1xyz987po…mno123abc          │
+│ Balance: 100.000000 XTZ                 │
+│ Network: mainnet                        │
+└─────────────────────────────────────────┘
+     ↑ Hard to read, cramped
+
+
+AFTER (Spacious):
+┌─────────────────────────────────────────┐
+│ Cold Storage (watch-only)               │
+│                                         │
+│ Address: tz1xyz987po…mno123abc          │
+│                                         │
+│ Balance: 100.000000 XTZ                 │
+│                                         │
+│ Network: mainnet                        │
+└─────────────────────────────────────────┘
+     ↑ Easy to read, professional
+
+
+═══════════════════════════════════════════════════════════════
+  MULTIPLE WALLETS - SWITCHING EXAMPLE
+═══════════════════════════════════════════════════════════════
+
+Switching from Alice to Bob:
+
+BEFORE (Hard to distinguish):
+Alice Main Wallet            →    Bob Savings
+Address: tz1alice...         →    Address: tz1bob456...
+Balance: 5.5 XTZ             →    Balance: 10.0 XTZ
+Network: mainnet             →    Network: ghostnet
+     ↑                                  ↑
+   Cramped                           Cramped
+
+
+AFTER (Clear and distinct):
+Alice Main Wallet            →    Bob Savings
+
+Address: tz1alice...         →    Address: tz1bob456...
+
+Balance: 5.5 XTZ             →    Balance: 10.0 XTZ
+
+Network: mainnet             →    Network: ghostnet
+     ↑                                  ↑
+ Easy to read!                    Easy to read!
+
+
+═══════════════════════════════════════════════════════════════
+  TECHNICAL DETAILS
+═══════════════════════════════════════════════════════════════
+
+CSS Changes:
+------------
+Added: margin-bottom: 1
+
+Applied to:
+• #wallet_name      (Line 1)
+• #wallet_address   (Line 2)
+• #wallet_balance   (Line 3)
+• #wallet_network   (Line 4 - no margin, last element)
+
+Textual Units:
+--------------
+margin-bottom: 1 = One line of spacing
+• Not too small (0 = cramped)
+• Not too large (2+ = wasteful)
+• Just right (1 = perfect balance)
+
+
+═══════════════════════════════════════════════════════════════
+  USER BENEFITS
+═══════════════════════════════════════════════════════════════
+
+✓ Easier to scan information
+✓ Less eye strain
+✓ More professional appearance
+✓ Better visual hierarchy
+✓ Improved readability
+✓ Modern UI design
+✓ Pleasant user experience
+
+
+═══════════════════════════════════════════════════════════════
+  SUMMARY
+═══════════════════════════════════════════════════════════════
+
+Simple CSS change:     margin-bottom: 1
+Big visual impact:     Much more readable!
+Performance cost:      Zero (CSS only)
+User experience:       Significantly improved!
+Compatibility:         100% (no breaking changes)
+
+Result: A small tweak that makes a huge difference! ✨
