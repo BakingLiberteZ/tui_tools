@@ -20,9 +20,9 @@ from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Header, Footer, ListView, ListItem, Label, Button, Input, Static
 
-from wallet.store import load_store, save_store, list_accounts, upsert_account, Account
-from wallet.crypto import encrypt_secret, decrypt_secret
-from wallet.tezos import (
+from sassy_wallet.core.store import load_store, save_store, list_accounts, upsert_account, Account
+from sassy_wallet.core.crypto import encrypt_secret, decrypt_secret
+from sassy_wallet.core.tezos import (
     get_balance_mutez,
     mutez_to_xtz,
     key_from_encoded_secret,
@@ -35,12 +35,12 @@ from wallet.tezos import (
     stake_xtz,
     unstake_xtz,
 )
-from wallet.logger import log_exception, safe_log_exception, log_error, log_info, log_warning
-from bakery_messages import get_message, SPINNER_MESSAGES, BAKER_MESSAGES, get_baker_message
-from staking_messages import get_staking_message
-from empty_wallet_messages import get_empty_wallet_message
-from balance_messages import get_balance_message
-from modal_messages import get_modal_message
+from sassy_wallet.core.logger import log_exception, safe_log_exception, log_error, log_info, log_warning
+from sassy_wallet.messages.bakery import get_message, SPINNER_MESSAGES, BAKER_MESSAGES, get_baker_message
+from sassy_wallet.messages.staking import get_staking_message
+from sassy_wallet.messages.empty_wallet import get_empty_wallet_message
+from sassy_wallet.messages.balance import get_balance_message
+from sassy_wallet.messages.modal import get_modal_message
 
 
 # --- Configuration constants ---
@@ -136,7 +136,7 @@ def is_tezos_destination(addr: str) -> bool:
 @safe_log_exception(default_return="💅 Sassy Wallet 💅", user_message="Failed to load ASCII logo")
 def load_ascii_logo() -> str:
     """Load ASCII logo from file as plain text. Returns logo string."""
-    logo_path = Path(__file__).parent / "ascii_logo.txt"
+    logo_path = Path(__file__).parent.parent / "assets" / "logo.txt"
     if logo_path.exists():
         return logo_path.read_text(encoding="utf-8").strip()
     # Fallback if file doesn't exist

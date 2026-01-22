@@ -29,16 +29,44 @@ A bold Tezos wallet with attitude. Not just managing your XTZ, but motivating yo
 - Python 3.10 or higher
 - pip (Python package manager)
 
-### Install Dependencies
+### Option 1: Install from Source (Recommended for Development)
 
 ```bash
-pip install -r requirements.txt
+# Clone the repository
+git clone https://github.com/BakingLiberteZ/tui-tezos-wallet.git
+cd tui-tezos-wallet
+
+# Install in development mode
+pip install -e .
+
+# Run the application
+sassy-wallet
 ```
 
-### Run the Application
+### Option 2: Install as Package
 
 ```bash
-python3 app.py
+# Clone and install
+git clone https://github.com/BakingLiberteZ/tui-tezos-wallet.git
+cd tui-tezos-wallet
+pip install .
+
+# Run from anywhere
+sassy-wallet
+```
+
+### Option 3: Run Directly (Without Installation)
+
+```bash
+# Clone the repository
+git clone https://github.com/BakingLiberteZ/tui-tezos-wallet.git
+cd tui-tezos-wallet
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run as module
+python -m sassy_wallet
 ```
 
 ---
@@ -167,20 +195,39 @@ Press `i` to open the import selector. Choose your method:
 
 ```
 sassy-wallet/
-├── app.py                      # Main application (UI + logic)
-├── wallet/
-│   ├── crypto.py              # AES-256 encryption
-│   ├── logger.py              # Structured logging system
-│   ├── store.py               # Data persistence
-│   └── tezos.py               # Blockchain interaction
-├── bakery_messages.py         # Dynamic messages for operations
-├── staking_messages.py        # Motivational staking messages (CHAD/BORING/LAZY)
-├── balance_messages.py        # Messages based on balance tier
-├── empty_wallet_messages.py   # Messages for empty wallets
-├── logs/
-│   └── wallet.log             # Debug logs
-├── test_*.py                  # Validation tests
-└── README.md                  # This file
+├── sassy_wallet/               # Main package
+│   ├── __init__.py            # Package initialization
+│   ├── __main__.py            # CLI entry point
+│   ├── ui/                    # User interface
+│   │   ├── __init__.py
+│   │   └── app.py             # Textual TUI application
+│   ├── core/                  # Core functionality
+│   │   ├── __init__.py
+│   │   ├── crypto.py          # AES-256 encryption
+│   │   ├── logger.py          # Structured logging
+│   │   ├── store.py           # Data persistence
+│   │   └── tezos.py           # Blockchain interaction
+│   ├── messages/              # Dynamic message systems
+│   │   ├── __init__.py
+│   │   ├── bakery.py          # Operation messages
+│   │   ├── balance.py         # Balance tier messages
+│   │   ├── staking.py         # Staking messages
+│   │   ├── empty_wallet.py    # Empty wallet messages
+│   │   └── modal.py           # Modal messages
+│   └── assets/
+│       └── logo.txt           # ASCII logo
+├── tests/                     # Test suite
+│   ├── __init__.py
+│   └── test_basic.py
+├── .github/
+│   └── workflows/
+│       └── python-app.yml     # CI/CD pipeline
+├── LICENSE                    # MIT License
+├── README.md                  # This file
+├── CHANGELOG.md               # Version history
+├── pyproject.toml             # Modern Python packaging
+├── setup.py                   # Backward compatibility
+└── requirements.txt           # Dependencies
 ```
 
 ### Main Dependencies
@@ -197,20 +244,26 @@ sassy-wallet/
 ### Run Automated Tests
 
 ```bash
-# All tests (37 tests)
-python3 test_all_phases.py
+# Install with dev dependencies
+pip install -e ".[dev]"
 
-# Individual tests
-python3 test_phase1_complete.py  # Logging
-python3 test_phase2_complete.py  # Thread safety
-python3 test_phase3_complete.py  # Timeouts
-python3 test_phase4_complete.py  # Type hints
-python3 test_phase5_complete.py  # Constants
+# Run all tests
+pytest tests/ -v
+
+# Run with coverage
+pytest tests/ -v --cov=sassy_wallet --cov-report=term-missing
+
+# Run specific test
+pytest tests/test_basic.py -v
 ```
 
 ### Manual Testing (Ghostnet)
 
 Use Ghostnet for testing before using on Mainnet. Press `n` to switch networks.
+
+### CI/CD
+
+The project includes GitHub Actions for automated testing on Python 3.10, 3.11, and 3.12.
 
 ---
 
