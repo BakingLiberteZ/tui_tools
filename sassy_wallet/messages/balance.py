@@ -54,11 +54,13 @@ DUST_DELEGATING = [
 ]
 
 DUST_LAZY = [
-    "😂 Less than 1 XTZ and not even delegating? BOLD strategy!",
-    "🌫️ Your balance is basically air. At least delegate it!",
-    "💀 Ghost wallet! Almost nothing AND not participating? Come on!",
-    "🦗 *Crickets* Even dust should be delegated! Do something!",
-    "🎭 The audacity of having dust and doing NOTHING with it!",
+    "😂 Less than 1 XTZ and not even delegating? BOLD strategy! ¬¬",
+    "🌫️ Your balance is basically air. At least delegate it! ¬¬",
+    "💀 Ghost wallet! Almost nothing AND not participating? Come on! ¬¬",
+    "🦗 *Crickets* Even dust should be delegated! Do something! ¬¬",
+    "🎭 The audacity of having dust and doing NOTHING with it! ¬¬",
+    "🤷 Dust + lazy = certified crypto hobo! ¬¬",
+    "😑 Your wallet is basically a museum piece. ¬¬",
 ]
 
 # ============================================================================
@@ -81,24 +83,26 @@ BROKE_STAKING = [
 ]
 
 BROKE_DELEGATING = [
-    "😐 Delegating is OK, but you could do MORE! Try staking!",
-    "🥉 Bronze medal effort. Staking = gold! Upgrade your game!",
-    "💤 Playing it safe with delegation? Staking has better rewards!",
-    "🤷 Small bag delegating only? You're missing out on staking!",
-    "😴 Delegation is the participation trophy. Staking is the real deal!",
-    "📈 Your balance could GROW faster with staking! Just saying...",
-    "🎻 Could be earning more... switch to staking! Trust me!",
+    "😐 Delegating is OK, but you could do MORE! Try staking! ¬¬",
+    "🥉 Bronze medal effort. Staking = gold! Upgrade your game! ¬¬",
+    "💤 Playing it safe with delegation? Staking has better rewards! ¬¬",
+    "🤷 Small bag delegating only? You're missing out on staking! ¬¬",
+    "😴 Delegation is the participation trophy. Staking is the real deal! ¬¬",
+    "📈 Your balance could GROW faster with staking! Just saying... ¬¬",
+    "🎻 Could be earning more... switch to staking! Trust me! ¬¬",
 ]
 
 BROKE_LAZY = [
-    "😂 McDonald's not paying too much, crypto bro? AND not delegating?",
-    "💀 Under 100 XTZ and doing NOTHING? Opportunity = missed!",
-    "🤡 Small bag, zero effort! At LEAST delegate, come on!",
-    "🦥 Sloth mode activated! Your XTZ wants to work, let them!",
-    "💸 Not much to work with AND not delegating? Savage behavior!",
-    "😭 Broke AND lazy? Double whammy! Start delegating NOW!",
-    "🏜️ Desert vibes: dry wallet, dry participation. Do something!",
-    "🎪 Welcome to the circus: small balance + zero action = clown!",
+    "😂 McDonald's not paying too much, crypto bro? AND not delegating? ¬¬",
+    "💀 Under 100 XTZ and doing NOTHING? Opportunity = missed! ¬¬",
+    "🤡 Small bag, zero effort! At LEAST delegate, come on! ¬¬",
+    "🦥 Sloth mode activated! Your XTZ wants to work, let them! ¬¬",
+    "💸 Not much to work with AND not delegating? Savage behavior! ¬¬",
+    "😭 Broke AND lazy? Double whammy! Start delegating NOW! ¬¬",
+    "🏜️ Desert vibes: dry wallet, dry participation. Do something! ¬¬",
+    "🎪 Welcome to the circus: small balance + zero action = clown! ¬¬",
+    "🪦 RIP to your potential earnings. ¬¬",
+    "🎮 Playing crypto on easy mode... and still losing. ¬¬",
 ]
 
 # ============================================================================
@@ -121,23 +125,25 @@ SAVER_STAKING = [
 ]
 
 SAVER_DELEGATING = [
-    "💰 Good savings, but delegating only? Staking unlocks MORE!",
-    "🤔 Nice bag! Why not STAKE it for better rewards?",
-    "💤 Delegating your savings? Staking would be the next level!",
-    "📊 Solid balance, but you're leaving money on the table!",
-    "🥈 Silver tier! Go for GOLD with staking!",
-    "😐 Nice cushion, but it could be NICER with staking!",
-    "🎯 Close to pro level! Just need to stake instead of delegate!",
+    "💰 Good savings, but delegating only? Staking unlocks MORE! ¬¬",
+    "🤔 Nice bag! Why not STAKE it for better rewards? ¬¬",
+    "💤 Delegating your savings? Staking would be the next level! ¬¬",
+    "📊 Solid balance, but you're leaving money on the table! ¬¬",
+    "🥈 Silver tier! Go for GOLD with staking! ¬¬",
+    "😐 Nice cushion, but it could be NICER with staking! ¬¬",
+    "🎯 Close to pro level! Just need to stake instead of delegate! ¬¬",
 ]
 
 SAVER_LAZY = [
-    "😱 100-500 XTZ just SITTING there? Criminal negligence!",
-    "💀 Nice savings doing NOTHING! What a waste!",
-    "🤦 That's real money just collecting dust! Delegate or stake!",
-    "🔥 Your XTZ are screaming 'USE US!' Listen to them!",
-    "💸 Leaving money on the table like it's a buffet! Stop it!",
-    "😭 SO MUCH POTENTIAL... wasted! Stake or delegate NOW!",
-    "🎪 The greatest show: Good balance + zero action = tragedy!",
+    "😱 100-500 XTZ just SITTING there? Criminal negligence! ¬¬",
+    "💀 Nice savings doing NOTHING! What a waste! ¬¬",
+    "🤦 That's real money just collecting dust! Delegate or stake! ¬¬",
+    "🔥 Your XTZ are screaming 'USE US!' Listen to them! ¬¬",
+    "💸 Leaving money on the table like it's a buffet! Stop it! ¬¬",
+    "😭 SO MUCH POTENTIAL... wasted! Stake or delegate NOW! ¬¬",
+    "🎪 The greatest show: Good balance + zero action = tragedy! ¬¬",
+    "🪦 Your XTZ are dying of boredom. ¬¬",
+    "🏖️ Your coins on permanent vacation. Nice life! ¬¬",
 ]
 
 # ============================================================================
@@ -160,21 +166,23 @@ INVESTOR_STAKING = [
 ]
 
 INVESTOR_DELEGATING = [
-    "🤔 500+ XTZ but only delegating? You're SO CLOSE to greatness!",
-    "💼 Business class traveler using economy! STAKE for first class!",
-    "😐 That's serious money not being SERIOUS! Stake it!",
-    "📊 Investor-level bag, beginner-level strategy. Upgrade to staking!",
-    "🎯 You have the capital, now add the strategy: STAKE!",
-    "💰 That's investment-grade capital doing tourist-level work!",
+    "🤔 500+ XTZ but only delegating? You're SO CLOSE to greatness! ¬¬",
+    "💼 Business class traveler using economy! STAKE for first class! ¬¬",
+    "😐 That's serious money not being SERIOUS! Stake it! ¬¬",
+    "📊 Investor-level bag, beginner-level strategy. Upgrade to staking! ¬¬",
+    "🎯 You have the capital, now add the strategy: STAKE! ¬¬",
+    "💰 That's investment-grade capital doing tourist-level work! ¬¬",
 ]
 
 INVESTOR_LAZY = [
-    "😱 500+ XTZ just IDLE?! That's a CAR not working for you!",
-    "💀 SERIOUS money doing NOTHING! This hurts to see!",
-    "🔥 Your portfolio is ON FIRE... but not in a good way!",
-    "😭 Investor-level bag, ZERO-level action! UNACCEPTABLE!",
-    "💸 That's rent money × 10 just sitting! Delegate or stake!",
-    "🤦 The network NEEDS you and you're just... watching?!",
+    "😱 500+ XTZ just IDLE?! That's a CAR not working for you! ¬¬",
+    "💀 SERIOUS money doing NOTHING! This hurts to see! ¬¬",
+    "🔥 Your portfolio is ON FIRE... but not in a good way! ¬¬",
+    "😭 Investor-level bag, ZERO-level action! UNACCEPTABLE! ¬¬",
+    "💸 That's rent money × 10 just sitting! Delegate or stake! ¬¬",
+    "🤦 The network NEEDS you and you're just... watching?! ¬¬",
+    "🏝️ Vacation mode with serious money? Interesting choice. ¬¬",
+    "🎰 Having serious cash and doing nothing = gambling against yourself! ¬¬",
 ]
 
 # ============================================================================
@@ -199,21 +207,23 @@ WHALE_BABY_STAKING = [
 ]
 
 WHALE_BABY_DELEGATING = [
-    "🐋 Baby whale delegating? STAKE IT! You're leaving BIG rewards!",
-    "💼 That's a down payment on a HOUSE just delegating!",
-    "😐 Whale-level bag, shrimp-level strategy. STAKE!",
-    "🎯 You have whale power, use it! STAKE for maximum impact!",
-    "💰 That's investment property money! Make it work HARDER!",
-    "🤔 At this level, staking isn't optional, it's MANDATORY!",
+    "🐋 Baby whale delegating? STAKE IT! You're leaving BIG rewards! ¬¬",
+    "💼 That's a down payment on a HOUSE just delegating! ¬¬",
+    "😐 Whale-level bag, shrimp-level strategy. STAKE! ¬¬",
+    "🎯 You have whale power, use it! STAKE for maximum impact! ¬¬",
+    "💰 That's investment property money! Make it work HARDER! ¬¬",
+    "🤔 At this level, staking isn't optional, it's MANDATORY! ¬¬",
 ]
 
 WHALE_BABY_LAZY = [
-    "😱 1000+ XTZ IDLE?! That's a small BUSINESS not running!",
-    "💀 WHALE doing NOTHING! The ocean is CRYING!",
-    "🔥 This is BIG MONEY just... existing?! STAKE IT!",
-    "😭 The network DESPERATELY needs whales like you! PARTICIPATE!",
-    "💸 That's a NEW CAR sitting in your wallet! Make it WORK!",
-    "🤦 Whale-level responsibility, zero-level action. Not OK!",
+    "😱 1000+ XTZ IDLE?! That's a small BUSINESS not running! ¬¬",
+    "💀 WHALE doing NOTHING! The ocean is CRYING! ¬¬",
+    "🔥 This is BIG MONEY just... existing?! STAKE IT! ¬¬",
+    "😭 The network DESPERATELY needs whales like you! PARTICIPATE! ¬¬",
+    "💸 That's a NEW CAR sitting in your wallet! Make it WORK! ¬¬",
+    "🤦 Whale-level responsibility, zero-level action. Not OK! ¬¬",
+    "🏖️ Baby whale on permanent beach vacation. Must be nice! ¬¬",
+    "🎭 The tragedy of having whale money and doing plankton work. ¬¬",
 ]
 
 # ============================================================================
@@ -240,22 +250,24 @@ WHALE_STAKING = [
 ]
 
 WHALE_DELEGATING = [
-    "🐳 WHALE delegating?! You should be STAKING! Imagine the rewards!",
-    "👑 Royalty-level bag with peasant-level strategy? STAKE IT!",
-    "💎 You have LIFE-CHANGING money! STAKE for even MORE!",
-    "😐 That's generational wealth just... delegating? STAKE!",
-    "🎯 At THIS level, you should be setting the example! STAKE!",
-    "💰 That's a HOUSE! And you're just delegating? Upgrade NOW!",
+    "🐳 WHALE delegating?! You should be STAKING! Imagine the rewards! ¬¬",
+    "👑 Royalty-level bag with peasant-level strategy? STAKE IT! ¬¬",
+    "💎 You have LIFE-CHANGING money! STAKE for even MORE! ¬¬",
+    "😐 That's generational wealth just... delegating? STAKE! ¬¬",
+    "🎯 At THIS level, you should be setting the example! STAKE! ¬¬",
+    "💰 That's a HOUSE! And you're just delegating? Upgrade NOW! ¬¬",
 ]
 
 WHALE_LAZY = [
-    "😱 5000+ XTZ IDLE?! That's LIFE-CHANGING money doing NOTHING!",
-    "💀 WHALE EMERGENCY! This much idle is a TRAGEDY!",
-    "🔥 The ENTIRE network is waiting for you! STAKE OR DELEGATE!",
-    "😭 Your bag could change lives! Instead it's just... existing?!",
-    "💸 That's a TESLA + insurance sitting idle! UNACCEPTABLE!",
-    "🤦 Whale-level bag, plankton-level participation. CRISIS!",
-    "🆘 SOS! WHALE needs immediate staking intervention!",
+    "😱 5000+ XTZ IDLE?! That's LIFE-CHANGING money doing NOTHING! ¬¬",
+    "💀 WHALE EMERGENCY! This much idle is a TRAGEDY! ¬¬",
+    "🔥 The ENTIRE network is waiting for you! STAKE OR DELEGATE! ¬¬",
+    "😭 Your bag could change lives! Instead it's just... existing?! ¬¬",
+    "💸 That's a TESLA + insurance sitting idle! UNACCEPTABLE! ¬¬",
+    "🤦 Whale-level bag, plankton-level participation. CRISIS! ¬¬",
+    "🆘 SOS! WHALE needs immediate staking intervention! ¬¬",
+    "🏝️ Retired whale living off... nothing? Interesting strategy. ¬¬",
+    "🎪 The circus called: they want their whale-sized opportunity waste back! ¬¬",
 ]
 
 # ============================================================================

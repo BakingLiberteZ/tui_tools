@@ -54,6 +54,9 @@ def setup_logger(name: str = "wallet", log_file: str = "logs/wallet.log", level:
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
 
+    # Prevent propagation to root logger (which might have StreamHandler)
+    logger.propagate = False
+
     return logger
 
 

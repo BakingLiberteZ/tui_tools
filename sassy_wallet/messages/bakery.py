@@ -30,23 +30,27 @@ RPC_OVEN_HOT = [
 ]
 
 RPC_OVEN_WARM = [
-    "⚡ RPC oven is warm but can't preview the dough! Blind baking mode enabled! 🥖",
-    "⚡ Oven's hot but the window's foggy! Baking without peeking - trust the process! 🪟🥐",
-    "⚡ Warm oven, no preview! Like baking with your eyes closed - adventurous! 😎🍞",
-    "⚡ Oven ready but no test batches! Going in blind - baker's instinct mode! 🎯🥖",
+    "⚡ RPC oven is warm but can't preview the dough! Blind baking mode enabled! ¬¬ 🥖",
+    "⚡ Oven's hot but the window's foggy! Baking without peeking - trust the process! ¬¬ 🪟🥐",
+    "⚡ Warm oven, no preview! Like baking with your eyes closed - adventurous! ¬¬ 😎🍞",
+    "⚡ Oven ready but no test batches! Going in blind - baker's instinct mode! ¬¬ 🎯🥖",
     "⚡ Can bake but can't taste-test first! Living on the edge, baker style! 🤘🥐",
-    "⚡ Oven's cooking but the timer's broken! Trusting your baker's intuition! ⏰✨",
-    "⚡ Heat's there but no thermometer! Old-school baking vibes! 🌡️🥖",
+    "⚡ Oven's cooking but the timer's broken! Trusting your baker's intuition! ¬¬ ⏰✨",
+    "⚡ Heat's there but no thermometer! Old-school baking vibes! ¬¬ 🌡️🥖",
+    "⚡ Oven works but no taste testing! What could go wrong? ¬¬ 😬🥖",
+    "⚡ Baking blind! Hope the recipe's right... ¬¬ 🤞🥐",
 ]
 
 RPC_DISPLAY_ONLY = [
-    "🪟 RPC oven is display-only! Window shopping at the bakery! 👀",
-    "🪟 Glass case mode! You can look but can't touch the pastries! 🥐👁️",
-    "🪟 Bakery showcase only! All the goodies behind glass! ✨🪟",
-    "🪟 Display shelf activated! Admire the bread, don't buy the bread! 🍞😅",
-    "🪟 Window browsing mode! Like a food court on a diet! 👀🥐",
-    "🪟 Exhibition only! Museum of delicious pastries - no sampling! 🖼️🥖",
-    "🪟 Showroom vibes! Everything's pretty but hands off! 🙅‍♀️✨",
+    "🪟 RPC oven is display-only! Window shopping at the bakery! ¬¬ 👀",
+    "🪟 Glass case mode! You can look but can't touch the pastries! ¬¬ 🥐👁️",
+    "🪟 Bakery showcase only! All the goodies behind glass! ¬¬ ✨🪟",
+    "🪟 Display shelf activated! Admire the bread, don't buy the bread! ¬¬ 🍞😅",
+    "🪟 Window browsing mode! Like a food court on a diet! ¬¬ 👀🥐",
+    "🪟 Exhibition only! Museum of delicious pastries - no sampling! ¬¬ 🖼️🥖",
+    "🪟 Showroom vibes! Everything's pretty but hands off! ¬¬ 🙅‍♀️✨",
+    "🪟 Read-only bakery! Eyes only, no touching! ¬¬ 👁️🥖",
+    "🪟 Spectator mode! Watch other people eat bread! ¬¬ 😑🍞",
 ]
 
 RPC_CHECKING = [
@@ -148,18 +152,18 @@ REFRESH_SUCCESS = [
 SPINNER_MESSAGES = [
     "Counting tez... 🪙",
     "Asking the blockchain nicely... 🙏",
-    "Waking up the baker... 👨‍🍳",
+    "Waking up the baker... ¬¬ 👨‍🍳",
     "Preheating the oven... 🔥",
     "Kneading the dough... 🥖",
     "Baking fresh blocks... 🍞",
     "Rolling croissants... 🥐",
     "Sprinkling flour on validators... 👨‍🍳",
     "Brewing some blockchain coffee... ☕",
-    "Teaching octopuses to count... 🐙",
+    "Teaching octopuses to count... ¬¬ 🐙",
     "Consulting the Tezos oracle... 🔮",
-    "Spinning the hamster wheel... 🐹",
+    "Spinning the hamster wheel... ¬¬ 🐹",
     "Defrosting frozen tokens... ❄️",
-    "Negotiating with smart contracts... 🤝",
+    "Negotiating with smart contracts... ¬¬ 🤝",
     "Rolling the dice... 🎲",
     "Summoning blockchain spirits... 👻",
     "Polishing your XTZ... ✨",
@@ -170,7 +174,7 @@ SPINNER_MESSAGES = [
     "Letting the dough rise... ⏰",
     "Dusting the display shelf... 🧹✨",
     "Adding yeast to the network... 🧪",
-    "Folding napkins at the bakery... 🧺",
+    "Folding napkins at the bakery... ¬¬ 🧺",
     "Arranging croissants artistically... 🎨🥐",
     "Sifting the blockchain flour... 🌾",
     "Proofing the dough... ⏱️",
@@ -181,6 +185,14 @@ SPINNER_MESSAGES = [
     "Sharpening the bread knife... 🔪",
     "Reading ancient baking scrolls... 📜",
     "Summoning the sourdough spirits... 👻🍞",
+    "Convincing nodes to cooperate... ¬¬ 🤷",
+    "Bribing the validators with cookies... ¬¬ 🍪",
+    "Waiting for blockchain to wake up... ¬¬ 💤",
+    "Explaining crypto to grandma... ¬¬ 👵",
+    "Herding digital cats... ¬¬ 🐱",
+    "Debugging the universe... ¬¬ 🌌",
+    "Reticulating splines... ¬¬ 📐",
+    "Calculating the meaning of XTZ... ¬¬ 🤔",
 ]
 
 # ============================================================================
@@ -203,6 +215,42 @@ BAKER_MESSAGES = [
     "🔥 Hot delegation action! Baker standing by!",
     "👨‍🍳 Master baker reviewing your delegation...",
     "🍞 Blockchain bakery hard at work!",
+]
+
+# ============================================================================
+# WALLET LOADING MESSAGES (for stake screen wallet info loading)
+# ============================================================================
+
+WALLET_LOADING = [
+    "Waking up the baker... 👨‍🍳💤",
+    "Consulting the blockchain... 🔮",
+    "Counting XTZ... 🪙✨",
+    "Checking staking status... ⚡",
+    "Asking bakers nicely... 🙏🥖",
+    "Summoning delegation info... 📡",
+    "Brewing blockchain data... ☕",
+    "Defrosting frozen stats... ❄️🔥",
+    "Interrogating smart contracts... 🤔",
+    "Negotiating with RPC... 🤝",
+    "Polishing the numbers... ✨",
+    "Teaching octopuses to count... 🐙",
+    "Rolling the blockchain dice... 🎲",
+    "Feeding the validators... 🍕",
+    "Reading ancient ledgers... 📜",
+    "Untangling the network... 🧶",
+    "Spinning the hamster wheel... 🐹⚡",
+    "Charging flux capacitor... ⚡🔋",
+    "Summoning tez spirits... 👻💰",
+    "Dusting off the ledger... 🧹",
+    "Preheating the RPC oven... 🔥",
+    "Mixing delegation data... 🥣",
+    "Kneading the blockchain... 🥖",
+    "Proofing the smart contracts... ⏱️",
+    "Glazing the statistics... 🍩✨",
+    "Sifting through blocks... 🌾",
+    "Folding transaction history... 🧺",
+    "Arranging data artistically... 🎨",
+    "Buttering up the baker... 🧈👨‍🍳",
 ]
 
 # ============================================================================
@@ -238,11 +286,14 @@ IMPORT_FROM_BACKUP = [
 ]
 
 IMPORT_CANCELLED = [
-    "↩️ Import cancelled - No dough, no bread! 🍞",
-    "🚫 Import aborted - Oven stays empty! 🔥",
-    "↩️ Cancelled - The dough stays in storage! 📦",
-    "🛑 Import stopped - No pastries today! 🥐",
-    "↩️ Backing out - Kitchen remains closed! 👨‍🍳",
+    "↩️ Import cancelled - No dough, no bread! ¬¬ 🍞",
+    "🚫 Import aborted - Oven stays empty! ¬¬ 🔥",
+    "↩️ Cancelled - The dough stays in storage! ¬¬ 📦",
+    "🛑 Import stopped - No pastries today! ¬¬ 🥐",
+    "↩️ Backing out - Kitchen remains closed! ¬¬ 👨‍🍳",
+    "🚫 Nevermind! The bakery stays walletless! ¬¬ 🏚️",
+    "↩️ Changed your mind? Classic! ¬¬ 🤷",
+    "🛑 Import aborted! The oven sighs in relief! ¬¬ 😮‍💨",
 ]
 
 # ============================================================================
@@ -345,6 +396,11 @@ def get_spinner_message() -> str:
 def get_baker_message() -> str:
     """Get a random baker/delegation message."""
     return random.choice(BAKER_MESSAGES)
+
+
+def get_wallet_loading_message() -> str:
+    """Get a random wallet loading message for stake screen."""
+    return random.choice(WALLET_LOADING)
 
 
 # ============================================================================

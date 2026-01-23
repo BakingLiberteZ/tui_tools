@@ -6,11 +6,119 @@ import urllib.parse
 import urllib.error
 import ssl
 import time
+import requests
 
 from pytezos import pytezos
 from pytezos.crypto.key import Key
+from pytezos.crypto.encoding import base58_decode
 
 from .logger import safe_log_exception, log_error
+
+
+# Watermark for operation signing
+OPERATION_WATERMARK = b"\x03"
+
+
+def inject_signed_operation(rpc: str, signed_op_hex: str) -> str:
+    """
+    Inject a signed operation directly to the RPC.
+
+    Args:
+        rpc: RPC endpoint
+        signed_op_hex: Hex-encoded signed operation (forged_bytes + signature)
+
+    Returns:
+        Operation hash
+    """
+    url = f"{rpc}/injection/operation?chain=main"
+    data = json.dumps(signed_op_hex).encode("utf-8")  # Body: "deadbeef..." (JSON string)
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    log_error(f"[INJECTION DEBUG] URL: {url}")
+    log_error(f"[INJECTION DEBUG] Body length: {len(data)} bytes")
+    log_error(f"[INJECTION DEBUG] Body first 100 chars: {data[:100]}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = resp.read().decode().strip().strip('"')
+            log_error(f"[INJECTION DEBUG] Success! Op hash: {result}")
+            return result
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode() if e.fp else str(e)
+        log_error(f"[INJECTION DEBUG] Failed: {e.code} - {error_body}")
+        raise RuntimeError(f"Injection failed: {e.code} - {error_body}")
+
+
+def sign_and_inject_from_rpc_forge(rpc: str, key: Key, rpc_forged_hex: str) -> str:
+    """
+    Sign RPC-forged bytes and inject the operation.
+
+    This avoids forge mismatch issues between PyTezos and the RPC by using
+    the RPC's forge as the source of truth.
+
+    Args:
+        rpc: RPC endpoint
+        key: Private key for signing
+        rpc_forged_hex: Hex-encoded forged operation from RPC
+
+    Returns:
+        Operation hash
+    """
+    # 1) Convert hex to bytes
+    forged_bytes = bytes.fromhex(rpc_forged_hex)
+
+    # 2) Add operation watermark (0x03) - REQUIRED for Tezos operations
+    watermarked = OPERATION_WATERMARK + forged_bytes
+
+    # 3) Sign (returns base58: "sig..." or raw bytes depending on PyTezos version)
+    sig_result = key.sign(watermarked, generic=True)
+
+    # DEBUG logging BEFORE processing
+    log_error(f"[SIGNATURE DEBUG] sig_result type: {type(sig_result).__name__}")
+    log_error(f"[SIGNATURE DEBUG] sig_result repr: {repr(sig_result)[:100]}...")
+    log_error(f"[SIGNATURE DEBUG] sig_result is str: {isinstance(sig_result, str)}")
+    log_error(f"[SIGNATURE DEBUG] sig_result is bytes: {isinstance(sig_result, bytes)}")
+
+    # 4) Convert to raw bytes (must be exactly 64 bytes)
+    # ONLY decode if it's explicitly a string, otherwise treat as bytes
+    if isinstance(sig_result, str):
+        # Base58 string like "sigXXX...", decode it
+        log_error(f"[SIGNATURE DEBUG] Decoding as base58 string...")
+        sig_bytes = base58_decode(sig_result)
+    else:
+        # Bytes or bytes-like object, use directly
+        log_error(f"[SIGNATURE DEBUG] Using as raw bytes...")
+        sig_bytes = bytes(sig_result) if not isinstance(sig_result, bytes) else sig_result
+
+    log_error(f"[SIGNATURE DEBUG] sig_bytes length: {len(sig_bytes)} bytes")
+    log_error(f"[SIGNATURE DEBUG] sig_bytes hex: {sig_bytes.hex()}")
+
+    # CRITICAL CHECK: Must be exactly 64 bytes
+    if len(sig_bytes) != 64:
+        raise RuntimeError(f"Signature bytes length invalid: {len(sig_bytes)} (expected 64)")
+
+    # 5) Combine: forged + signature bytes
+    signed_op_hex = rpc_forged_hex + sig_bytes.hex()
+
+    # DEBUG: Verify concatenation
+    log_error(f"[SIGNATURE DEBUG] Forged part: {len(rpc_forged_hex)} chars")
+    log_error(f"[SIGNATURE DEBUG] Signature part: {len(sig_bytes.hex())} chars (should be 128)")
+    log_error(f"[SIGNATURE DEBUG] Total: {len(signed_op_hex)} chars (should be {len(rpc_forged_hex)} + 128)")
+    log_error(f"[SIGNATURE DEBUG] First 80: {signed_op_hex[:80]}")
+    log_error(f"[SIGNATURE DEBUG] Last 80: {signed_op_hex[-80:]}")
+
+    # CRITICAL CHECK: Total length must be correct
+    expected_length = len(rpc_forged_hex) + 128  # 64 bytes = 128 hex chars
+    if len(signed_op_hex) != expected_length:
+        raise RuntimeError(f"Signed op length {len(signed_op_hex)} != expected {expected_length}")
+
+    # 6) Inject the hex
+    return inject_signed_operation(rpc, signed_op_hex)
 
 
 def get_client(rpc: str, key: Optional[Key] = None) -> Any:
@@ -156,6 +264,139 @@ def get_staking_balance(rpc: str, address: str) -> int:
     return int(staked_balance) if staked_balance else 0
 
 
+@safe_log_exception(default_return=None, user_message="Failed to get baker info")
+def get_baker_info(rpc: str, baker_address: str) -> Optional[dict]:
+    """
+    Get comprehensive information about a baker from TzKT API.
+
+    Args:
+        rpc: RPC endpoint
+        baker_address: Baker's address (tz1/tz2/tz3/tz4)
+
+    Returns:
+        Dictionary with baker info:
+        {
+            'address': str,          # Full address
+            'alias': Optional[str],  # Alias or Tezos Domain name
+            'balance': int,          # Balance in mutez
+        }
+        Or None if information is unavailable
+    """
+    base = _tzkt_base_from_rpc(rpc)
+    url = f"{base}/v1/accounts/{baker_address}"
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "sassy-wallet/1.3.0"},
+        method="GET",
+    )
+    data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+
+    if data is None:
+        return None
+
+    # Extract relevant information
+    balance = data.get("balance")
+    if balance is None:
+        return None
+
+    # Get alias or domain name
+    alias = data.get("alias")
+
+    return {
+        'address': baker_address,
+        'alias': alias,
+        'balance': int(balance),
+    }
+
+
+def get_baker_staking_balance(rpc: str, baker_address: str) -> Optional[int]:
+    """
+    Get the baker's own balance in mutez (balance in their wallet).
+    This is used to determine the baker's size tier for commentary.
+    Returns None if information is unavailable.
+
+    Args:
+        rpc: RPC endpoint
+        baker_address: Baker's address (tz1/tz2/tz3/tz4)
+
+    Returns:
+        Baker's balance in mutez, or None if unavailable
+    """
+    baker_info = get_baker_info(rpc, baker_address)
+    if baker_info:
+        return baker_info['balance']
+    return None
+
+
+@safe_log_exception(default_return=[], user_message="Failed to get public bakers list")
+def get_public_bakers(rpc: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Get a list of public bakers (delegates) with aliases or Tezos Domains from TzKT API.
+    Returns active bakers sorted by staked balance (largest first).
+
+    Args:
+        rpc: RPC endpoint
+        limit: Maximum number of bakers to return (default: 50)
+
+    Returns:
+        List of dictionaries with baker information:
+        [
+            {
+                'address': str,          # Full baker address
+                'alias': str,            # Baker alias or Tezos Domain name
+                'balance': int,          # Baker's balance in mutez
+                'stakedBalance': int,    # Total staked balance in mutez
+            },
+            ...
+        ]
+        Empty list if information is unavailable.
+    """
+    base = _tzkt_base_from_rpc(rpc)
+
+    # Get active delegates sorted by staked balance (descending)
+    # API parameters confirmed with tzkt.io API testing:
+    # - active=true (NOT active.eq=true)
+    # - sort.desc=stakedBalance (NOT stakingBalance)
+    # - limit=N
+    params = {
+        "active": "true",
+        "sort.desc": "stakedBalance",
+        "limit": str(limit * 2),  # Request more to filter those with aliases
+    }
+
+    url = f"{base}/v1/delegates?" + urllib.parse.urlencode(params)
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "sassy-wallet/1.3.0"},
+        method="GET",
+    )
+    data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+
+    if not isinstance(data, list):
+        return []
+
+    # Filter only bakers with aliases and extract relevant information
+    bakers = []
+    for baker in data:
+        alias = baker.get("alias")
+        # Only include bakers with aliases or Tezos Domains
+        if alias:
+            bakers.append({
+                'address': baker.get("address", ""),
+                'alias': alias,
+                'balance': int(baker.get("balance", 0)),
+                'stakedBalance': int(baker.get("stakedBalance", 0)),
+            })
+
+            # Stop when we have enough bakers with aliases
+            if len(bakers) >= limit:
+                break
+
+    return bakers
+
+
 def mutez_to_xtz(m: int) -> Decimal:
     return Decimal(m) / Decimal(1_000_000)
 
@@ -183,6 +424,30 @@ def _contains_unrevealed_key(err: Any) -> bool:
         log_error("Failed to get repr of error", exception=e)
         r = ""
     return "unrevealed_key" in r
+
+
+def is_wallet_revealed(rpc: str, address: str) -> bool:
+    """
+    Check if a wallet's public key has been revealed on the blockchain.
+
+    Returns:
+        True if wallet is revealed (has made at least one operation)
+        False if wallet is unrevealed (never signed a transaction)
+    """
+    try:
+        client = get_client(rpc)
+        # Get manager key - will be None if unrevealed
+        manager_key = client.shell.contracts[address].manager_key()
+
+        # If manager_key is None or empty, wallet is not revealed
+        if manager_key is None or manager_key == {}:
+            return False
+
+        return True
+    except Exception as e:
+        # If we can't determine, assume it's revealed to avoid false warnings
+        log_error(f"Could not check reveal status for {address}", exception=e)
+        return True
 
 
 def _tzkt_base_from_rpc(rpc: str) -> str:
@@ -280,6 +545,10 @@ def is_revealed(rpc: str, address: str) -> bool:
     """
     True si la cuenta tz* tiene manager_key revelada.
     """
+    # Defensive: if address is a Key object, extract the address string
+    if hasattr(address, 'public_key_hash'):
+        address = address.public_key_hash()
+
     client = get_client(rpc)
     mk = client.shell.contracts[address].manager_key()
     if mk is None:
@@ -410,6 +679,226 @@ def estimate_send_xtz(
         "tx_fee_mutez": tx_fee_mutez,
         "total_fee_mutez": total_fee_mutez,
         "total_fee_xtz": mutez_to_xtz(total_fee_mutez),
+        "fee_options": fee_options,
+    }
+
+
+def estimate_stake(rpc: str, from_addr: str, amount_xtz: Decimal) -> Dict[str, Any]:
+    """
+    Estimate parameters for staking operation.
+    Uses conservative fixed values since autofill often underestimates for staking.
+
+    Args:
+        rpc: RPC endpoint
+        from_addr: Source address (tz1/tz2/tz3/tz4)
+        amount_xtz: Amount to stake in XTZ
+
+    Returns dict with same structure as estimate_send_xtz for UI compatibility.
+    """
+    reveal_needed = not is_revealed(rpc, from_addr)
+
+    # Reveal defaults (if needed)
+    reveal_fee_mutez = 1300 if reveal_needed else 0
+    reveal_info = {"fee_mutez": 1300, "gas_limit": 10000, "storage_limit": 0} if reveal_needed else None
+
+    # Staking defaults - conservative values that work
+    # Economy: moderate values
+    # Normal: safe values (DEFAULT)
+    # Priority: extra safe with padding
+    economy_fee = 6000   # 0.006 XTZ
+    economy_gas = 25000
+
+    normal_fee = 8000    # 0.008 XTZ (our current default)
+    normal_gas = 30000
+
+    priority_fee = 12000  # 0.012 XTZ
+    priority_gas = 35000
+
+    tx_info = {"fee_mutez": normal_fee, "gas_limit": normal_gas, "storage_limit": 0}
+
+    # Fee options for UI
+    fee_options = {
+        "economy": {
+            "label": "Economy",
+            "tx_fee_mutez": economy_fee,
+            "gas_limit": economy_gas,
+            "total_fee_mutez": reveal_fee_mutez + economy_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + economy_fee),
+        },
+        "normal": {
+            "label": "Normal (recommended)",
+            "tx_fee_mutez": normal_fee,
+            "gas_limit": normal_gas,
+            "total_fee_mutez": reveal_fee_mutez + normal_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + normal_fee),
+        },
+        "priority": {
+            "label": "Priority (extra safe)",
+            "tx_fee_mutez": priority_fee,
+            "gas_limit": priority_gas,
+            "total_fee_mutez": reveal_fee_mutez + priority_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + priority_fee),
+        },
+    }
+
+    return {
+        "from": from_addr,
+        "to": from_addr,  # Staking is to yourself
+        "amount_xtz": amount_xtz,
+        "reveal_needed": reveal_needed,
+        "reveal": reveal_info,
+        "tx": tx_info,
+        "reveal_fee_mutez": reveal_fee_mutez,
+        "tx_fee_mutez": normal_fee,
+        "total_fee_mutez": reveal_fee_mutez + normal_fee,
+        "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + normal_fee),
+        "fee_options": fee_options,
+    }
+
+
+def estimate_delegation(rpc: str, from_addr: str, baker_address: str) -> Dict[str, Any]:
+    """
+    Estimate parameters for delegation operation.
+    Uses conservative fixed values since delegation operations need moderate gas.
+
+    Args:
+        rpc: RPC endpoint
+        from_addr: Source address (tz1/tz2/tz3/tz4)
+        baker_address: Baker's address
+
+    Returns dict with same structure as estimate_send_xtz for UI compatibility.
+    """
+    reveal_needed = not is_revealed(rpc, from_addr)
+
+    # Reveal defaults (if needed)
+    reveal_fee_mutez = 1300 if reveal_needed else 0
+    reveal_info = {"fee_mutez": 1300, "gas_limit": 10000, "storage_limit": 0} if reveal_needed else None
+
+    # Delegation defaults - conservative values that work
+    # Delegation typically needs less gas than staking
+    # Economy: moderate values
+    # Normal: safe values (DEFAULT)
+    # Priority: extra safe with padding
+    economy_fee = 3000   # 0.003 XTZ
+    economy_gas = 15000
+
+    normal_fee = 5000    # 0.005 XTZ (DEFAULT)
+    normal_gas = 20000
+
+    priority_fee = 8000  # 0.008 XTZ
+    priority_gas = 25000
+
+    tx_info = {"fee_mutez": normal_fee, "gas_limit": normal_gas, "storage_limit": 0}
+
+    # Fee options for UI
+    fee_options = {
+        "economy": {
+            "label": "Economy",
+            "tx_fee_mutez": economy_fee,
+            "gas_limit": economy_gas,
+            "total_fee_mutez": reveal_fee_mutez + economy_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + economy_fee),
+        },
+        "normal": {
+            "label": "Normal (recommended)",
+            "tx_fee_mutez": normal_fee,
+            "gas_limit": normal_gas,
+            "total_fee_mutez": reveal_fee_mutez + normal_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + normal_fee),
+        },
+        "priority": {
+            "label": "Priority (extra safe)",
+            "tx_fee_mutez": priority_fee,
+            "gas_limit": priority_gas,
+            "total_fee_mutez": reveal_fee_mutez + priority_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + priority_fee),
+        },
+    }
+
+    return {
+        "from": from_addr,
+        "to": baker_address,  # Delegating to baker
+        "baker": baker_address,
+        "reveal_needed": reveal_needed,
+        "reveal": reveal_info,
+        "tx": tx_info,
+        "reveal_fee_mutez": reveal_fee_mutez,
+        "tx_fee_mutez": normal_fee,
+        "total_fee_mutez": reveal_fee_mutez + normal_fee,
+        "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + normal_fee),
+        "fee_options": fee_options,
+    }
+
+
+def estimate_unstake(rpc: str, from_addr: str, amount_xtz: Decimal) -> Dict[str, Any]:
+    """
+    Estimate parameters for unstaking operation.
+    Uses conservative fixed values since autofill often underestimates for unstaking.
+
+    Args:
+        rpc: RPC endpoint
+        from_addr: Source address (tz1/tz2/tz3/tz4)
+        amount_xtz: Amount to unstake in XTZ
+
+    Returns dict with same structure as estimate_send_xtz for UI compatibility.
+    """
+    reveal_needed = not is_revealed(rpc, from_addr)
+
+    # Reveal defaults (if needed)
+    reveal_fee_mutez = 1300 if reveal_needed else 0
+    reveal_info = {"fee_mutez": 1300, "gas_limit": 10000, "storage_limit": 0} if reveal_needed else None
+
+    # Unstaking defaults - conservative values similar to staking
+    # Economy: moderate values
+    # Normal: safe values (DEFAULT)
+    # Priority: extra safe with padding
+    economy_fee = 6000   # 0.006 XTZ
+    economy_gas = 25000
+
+    normal_fee = 8000    # 0.008 XTZ (DEFAULT)
+    normal_gas = 30000
+
+    priority_fee = 12000  # 0.012 XTZ
+    priority_gas = 35000
+
+    tx_info = {"fee_mutez": normal_fee, "gas_limit": normal_gas, "storage_limit": 0}
+
+    # Fee options for UI
+    fee_options = {
+        "economy": {
+            "label": "Economy",
+            "tx_fee_mutez": economy_fee,
+            "gas_limit": economy_gas,
+            "total_fee_mutez": reveal_fee_mutez + economy_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + economy_fee),
+        },
+        "normal": {
+            "label": "Normal (recommended)",
+            "tx_fee_mutez": normal_fee,
+            "gas_limit": normal_gas,
+            "total_fee_mutez": reveal_fee_mutez + normal_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + normal_fee),
+        },
+        "priority": {
+            "label": "Priority (extra safe)",
+            "tx_fee_mutez": priority_fee,
+            "gas_limit": priority_gas,
+            "total_fee_mutez": reveal_fee_mutez + priority_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + priority_fee),
+        },
+    }
+
+    return {
+        "from": from_addr,
+        "to": from_addr,  # Unstaking is from yourself
+        "amount_xtz": amount_xtz,
+        "reveal_needed": reveal_needed,
+        "reveal": reveal_info,
+        "tx": tx_info,
+        "reveal_fee_mutez": reveal_fee_mutez,
+        "tx_fee_mutez": normal_fee,
+        "total_fee_mutez": reveal_fee_mutez + normal_fee,
+        "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + normal_fee),
         "fee_options": fee_options,
     }
 
@@ -605,7 +1094,7 @@ def send_xtz(
             raise RuntimeError(f"Send failed after reveal ({reveal_oph}): {send_e}") from send_e
 
 
-def delegate_to_baker(rpc: str, key: Key, baker_address: str) -> str:
+def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optional[int] = None, gas_limit: Optional[int] = None, storage_limit: Optional[int] = None) -> str:
     """
     Delegate to a baker.
 
@@ -613,10 +1102,31 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str) -> str:
         rpc: RPC endpoint
         key: Account private key
         baker_address: Baker's address (tz1/tz2/tz3/tz4)
+        fee_mutez: Optional transaction fee in mutez
+        gas_limit: Optional gas limit
+        storage_limit: Optional storage limit
 
     Returns:
         Operation hash (op...)
     """
+    # Get source address from key
+    source_address = key.public_key_hash()
+
+    # Check if wallet is revealed (has made at least one operation)
+    if not is_wallet_revealed(rpc, source_address):
+        log_error(f"⚠️ Wallet {source_address[:10]}... is not revealed. Will attempt reveal operation first.")
+        # Note: We don't raise here - we let the normal flow handle the reveal
+        # This is just a proactive warning logged for user awareness
+
+    # Check for pending operations BEFORE attempting
+    pending_info = check_pending_operations(rpc, source_address)
+    if pending_info and pending_info.get('has_pending'):
+        pending_count = pending_info.get('pending_count', 0)
+        raise RuntimeError(
+            f"Cannot delegate: {pending_count} pending operation(s) detected for this wallet. "
+            f"Please wait 1-2 minutes for them to confirm, then try again."
+        )
+
     def _is_counter_error(e: Exception) -> bool:
         """Check if error is related to counter mismatch."""
         error_str = str(e).lower()
@@ -628,42 +1138,36 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str) -> str:
 
         for attempt in range(max_retries + 1):
             try:
-                # IMPORTANT: Create a completely fresh client on each attempt
-                # This ensures we get the latest counter from the blockchain
-                fresh_client = get_client(rpc, key=key)
+                # On retry attempts, wait for blockchain to settle
+                if attempt > 0:
+                    settling_time = 3.0  # Wait for blockchain to process previous attempt
+                    log_error(f"Waiting {settling_time}s for blockchain to settle before retry {attempt + 1}")
+                    time.sleep(settling_time)
 
-                # Get counter directly from RPC to avoid cache issues
-                address = key.public_key_hash()
-                try:
-                    current_counter = get_counter(rpc, address)
-                    log_error(f"Attempt {attempt + 1}: Using counter {current_counter} for address {address}")
-                except Exception as counter_e:
-                    log_error(f"Failed to get counter manually, will rely on autofill", exception=counter_e)
-                    current_counter = None
+                # Create completely fresh client with NO shared state
+                # IMPORTANT: using() creates a NEW instance each time
+                fresh_client = pytezos.using(shell=rpc, key=key)
 
-                # Build delegation operation
+                # Build delegation operation (counter=None means autofill will handle it)
                 op = fresh_client.delegation(baker_address)
 
-                # If we got a manual counter, set it explicitly before autofill
-                if current_counter is not None:
-                    try:
-                        # Use with_amount() to access the operation internals and set counter
-                        # PyTezos operations have a counter property we can set
-                        op = op.using(counter=current_counter)
-                    except Exception as set_counter_e:
-                        log_error(f"Failed to set counter manually, continuing with autofill", exception=set_counter_e)
-
-                # Autofill (fetches gas, fees, storage limit)
-                try:
+                # Use custom fees if provided, otherwise autofill
+                if fee_mutez is not None or gas_limit is not None or storage_limit is not None:
+                    # Use fill() with custom parameters
+                    fill_params = {}
+                    if fee_mutez is not None:
+                        fill_params['fee'] = fee_mutez
+                    if gas_limit is not None:
+                        fill_params['gas_limit'] = gas_limit
+                    if storage_limit is not None:
+                        fill_params['storage_limit'] = storage_limit
+                    op = op.fill(**fill_params)
+                else:
+                    # autofill() automatically fetches: counter, gas, storage, fees
+                    # It queries the blockchain directly for current state
                     op = op.autofill()
-                except Exception as e:
-                    # If autofill fails, try with fill
-                    try:
-                        op = op.fill()
-                    except Exception:
-                        raise RuntimeError(f"Failed to prepare operation: {e}") from e
 
-                # Sign and inject
+                # Sign and inject - trust autofill() to have set everything correctly
                 op = op.sign()
                 result = op.inject()
 
@@ -676,8 +1180,8 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str) -> str:
                 last_error = e
                 # Check if it's a counter error and we have retries left
                 if _is_counter_error(e) and attempt < max_retries:
-                    # Exponential backoff: wait longer on each retry
-                    wait_time = 3.0 * (attempt + 1)  # 3s, 6s, 9s (increased from 2s)
+                    # Conservative backoff for counter synchronization
+                    wait_time = 5.0 * (attempt + 1)  # 5s, 10s, 15s
                     log_error(f"Counter error on attempt {attempt + 1}, waiting {wait_time}s before retry", exception=e)
                     time.sleep(wait_time)
                     continue
@@ -692,46 +1196,38 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str) -> str:
             raise
 
         # Reveal first (also with retry logic)
+        log_error("Wallet not revealed. Attempting reveal operation first...")
+
         def _inject_reveal_with_retry(max_retries: int = 3):
             last_error = None
             for attempt in range(max_retries + 1):
                 try:
-                    fresh_client = get_client(rpc, key=key)
+                    # Wait before retry
+                    if attempt > 0:
+                        settling_time = 3.0
+                        log_error(f"Waiting {settling_time}s before reveal retry {attempt + 1}")
+                        time.sleep(settling_time)
 
-                    # Get counter manually for reveal
-                    address = key.public_key_hash()
-                    try:
-                        current_counter = get_counter(rpc, address)
-                        log_error(f"Reveal attempt {attempt + 1}: Using counter {current_counter}")
-                    except Exception as counter_e:
-                        log_error(f"Failed to get counter for reveal, will rely on autofill", exception=counter_e)
-                        current_counter = None
+                    # Create fresh client with NO shared state
+                    fresh_client = pytezos.using(shell=rpc, key=key)
 
+                    # Build reveal operation
                     op = fresh_client.reveal()
 
-                    # Set counter manually if we got it
-                    if current_counter is not None:
-                        try:
-                            op = op.using(counter=current_counter)
-                        except Exception as set_counter_e:
-                            log_error(f"Failed to set counter for reveal", exception=set_counter_e)
+                    # autofill() handles counter, gas, storage, fees
+                    op = op.autofill()
 
-                    try:
-                        op = op.autofill()
-                    except Exception as e:
-                        try:
-                            op = op.fill()
-                        except Exception:
-                            raise RuntimeError(f"Failed to prepare reveal: {e}") from e
+                    # Sign and inject
                     op = op.sign()
                     result = op.inject()
+
                     if isinstance(result, dict):
                         return result.get("hash", str(result))
                     return str(result)
                 except Exception as e:
                     last_error = e
                     if _is_counter_error(e) and attempt < max_retries:
-                        wait_time = 3.0 * (attempt + 1)  # Increased wait time
+                        wait_time = 5.0 * (attempt + 1)
                         log_error(f"Counter error on reveal attempt {attempt + 1}, waiting {wait_time}s", exception=e)
                         time.sleep(wait_time)
                         continue
@@ -741,20 +1237,29 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str) -> str:
         try:
             reveal_oph = _inject_reveal_with_retry()
         except Exception as rev_e:
-            raise RuntimeError(f"Reveal failed: {rev_e}") from rev_e
+            raise RuntimeError(
+                f"Failed to reveal wallet public key. "
+                f"This wallet has never been used before and needs to reveal its public key first. "
+                f"Error: {rev_e}"
+            ) from rev_e
 
-        # Wait longer for reveal to propagate
-        log_error(f"Reveal successful ({reveal_oph}), waiting 6s for propagation")
-        time.sleep(6)
+        # Wait longer for reveal to propagate through the network
+        log_error(f"Reveal successful ({reveal_oph}), waiting 8s for network propagation")
+        time.sleep(8)
 
-        # Retry delegation with fresh client
+        # Retry delegation with fresh client after reveal
+        log_error("Reveal complete. Retrying delegation...")
         try:
             return _inject_with_retry()
         except Exception as del_e:
-            raise RuntimeError(f"Delegation failed after reveal ({reveal_oph}): {del_e}") from del_e
+            raise RuntimeError(
+                f"Delegation failed after successful reveal (op: {reveal_oph}). "
+                f"This may be due to network delays. Please wait 1-2 minutes and try again. "
+                f"Error: {del_e}"
+            ) from del_e
 
 
-def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
+def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] = None, gas_limit: Optional[int] = None, storage_limit: Optional[int] = None) -> str:
     """
     Stake XTZ with the current baker.
     Account must already be delegated.
@@ -763,14 +1268,43 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
         rpc: RPC endpoint
         key: Account private key
         amount_xtz: Amount to stake in XTZ
+        fee_mutez: Optional transaction fee in mutez (defaults to 8000)
+        gas_limit: Optional gas limit (defaults to 30000)
+        storage_limit: Optional storage limit (defaults to 0)
 
     Returns:
         Operation hash (op...)
     """
+    # Get source address from key
+    source_address = key.public_key_hash()
+
+    # Check for pending operations BEFORE attempting
+    pending_info = check_pending_operations(rpc, source_address)
+    if pending_info and pending_info.get('has_pending'):
+        pending_count = pending_info.get('pending_count', 0)
+        raise RuntimeError(
+            f"Cannot stake: {pending_count} pending operation(s) detected for this wallet. "
+            f"Please wait 1-2 minutes for them to confirm, then try again."
+        )
+
+    # Check if wallet is revealed (has made at least one operation)
+    if not is_wallet_revealed(rpc, source_address):
+        log_error(f"⚠️ Wallet {source_address[:10]}... is not revealed. Will attempt reveal operation first.")
+        # Note: We don't raise here - we let the normal flow handle the reveal
+
     def _is_counter_error(e: Exception) -> bool:
         """Check if error is related to counter mismatch."""
         error_str = str(e).lower()
         return "counter" in error_str and ("not yet reached" in error_str or "already used" in error_str)
+
+    # Convert XTZ to mutez for transaction amount
+    amount_mutez = xtz_to_mutez(amount_xtz)
+
+    # Staking defaults - MUCH higher than normal transactions
+    # Use provided values or defaults
+    DEFAULT_STAKE_FEE = fee_mutez if fee_mutez is not None else 8000       # ~0.008 XTZ (higher for safety)
+    DEFAULT_STAKE_GAS = gas_limit if gas_limit is not None else 30000      # Conservative: 30k gas for staking
+    DEFAULT_STAKE_STORAGE = storage_limit if storage_limit is not None else 0  # Staking doesn't need storage
 
     def _inject_with_retry(max_retries: int = 3):
         """Build, autofill, sign, and inject with counter error retry logic."""
@@ -778,22 +1312,110 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
 
         for attempt in range(max_retries + 1):
             try:
-                # Create completely fresh client on each attempt
-                fresh_client = get_client(rpc, key=key)
-                op = fresh_client.stake(amount_xtz)
+                # On retry attempts, wait for blockchain to settle
+                if attempt > 0:
+                    settling_time = 3.0
+                    log_error(f"Waiting {settling_time}s for blockchain to settle before retry {attempt + 1}")
+                    time.sleep(settling_time)
 
-                # Autofill
+                # Read counter from RPC (FRESH on each retry)
                 try:
-                    op = op.autofill()
-                except Exception as e:
-                    try:
-                        op = op.fill()
-                    except Exception:
-                        raise RuntimeError(f"Failed to prepare operation: {e}") from e
+                    rpc_counter = get_counter(rpc, source_address) - 1  # get_counter already adds +1
+                    log_error(f"[Attempt {attempt + 1}] RPC counter for {source_address[:10]}: {rpc_counter}")
+                    counter_to_use = rpc_counter + 1
+                    log_error(f"[Attempt {attempt + 1}] Will use counter: {counter_to_use}")
+                except Exception as counter_err:
+                    log_error(f"Failed to read counter from RPC", exception=counter_err)
+                    raise
 
-                # Sign and inject
-                op = op.sign()
-                result = op.inject()
+                # Check mempool for pending ops
+                try:
+                    pending_info = check_pending_operations(rpc, source_address)
+                    if pending_info and pending_info.get('has_pending'):
+                        log_error(f"⚠️ WARNING: {pending_info.get('pending_count', 0)} pending ops in mempool")
+                except Exception:
+                    pass
+
+                # Create completely fresh client with NO shared state
+                client = get_client(rpc, key=key)
+
+                # ============================================================
+                # PRUEBA 0: Verificar que key corresponde al source
+                # ============================================================
+                key_pkh = key.public_key_hash()
+                log_error(f"[DEBUG] source_address: {source_address}")
+                log_error(f"[DEBUG] key.public_key_hash(): {key_pkh}")
+                if source_address != key_pkh:
+                    raise RuntimeError(f"KEY MISMATCH! source={source_address} but key.pkh={key_pkh}")
+                log_error(f"[DEBUG] ✅ Key matches source address")
+
+                # Get branch from head block
+                try:
+                    branch = client.shell.head.hash()
+                    log_error(f"[Attempt {attempt + 1}] Got branch: {branch}")
+                except Exception as branch_err:
+                    log_error(f"Failed to get branch", exception=branch_err)
+                    raise
+
+                # Build stake operation payload manually for RPC forge
+                # Staking is a pseudo-operation: a transaction to self with 'stake' entrypoint
+                log_error(f"[Attempt {attempt + 1}] Building stake op: {amount_xtz} XTZ")
+
+                # Construct operation contents
+                op_contents = {
+                    'kind': 'transaction',  # Pseudo-operation via transaction
+                    'source': source_address,
+                    'destination': source_address,  # Self-transfer
+                    'fee': str(DEFAULT_STAKE_FEE),
+                    'counter': str(counter_to_use),
+                    'gas_limit': str(DEFAULT_STAKE_GAS),
+                    'storage_limit': str(DEFAULT_STAKE_STORAGE),
+                    'amount': str(amount_mutez),
+                    'parameters': {
+                        'entrypoint': 'stake',
+                        'value': {'prim': 'Unit'}
+                    }
+                }
+
+                log_error(f"[Attempt {attempt + 1}] Operation contents:")
+                log_error(f"  - kind: stake")
+                log_error(f"  - counter: {counter_to_use}")
+                log_error(f"  - gas_limit: {DEFAULT_STAKE_GAS}")
+                log_error(f"  - storage_limit: {DEFAULT_STAKE_STORAGE}")
+                log_error(f"  - fee: {DEFAULT_STAKE_FEE} mutez")
+                log_error(f"  - amount: {amount_mutez} mutez")
+
+                # Prepare payload for RPC forge
+                forge_payload = {
+                    'branch': branch,
+                    'contents': [op_contents]
+                }
+
+                # Get RPC forge
+                log_error(f"[Attempt {attempt + 1}] Requesting forge from RPC...")
+                try:
+                    forge_url = f"{rpc}/chains/main/blocks/head/helpers/forge/operations"
+                    forge_response = requests.post(
+                        forge_url,
+                        json=forge_payload,
+                        headers={'content-type': 'application/json'},
+                        timeout=30
+                    )
+
+                    if forge_response.status_code != 200:
+                        raise RuntimeError(f"RPC forge failed: {forge_response.status_code} - {forge_response.text}")
+
+                    rpc_forged_hex = forge_response.text.strip().strip('"')
+                    log_error(f"[Attempt {attempt + 1}] RPC forged bytes: {rpc_forged_hex}")
+
+                except Exception as forge_err:
+                    log_error(f"RPC forge request failed", exception=forge_err)
+                    raise RuntimeError(f"Failed to forge operation via RPC: {forge_err}")
+
+                # Sign and inject using RPC forge
+                log_error(f"[Attempt {attempt + 1}] Signing RPC-forged bytes...")
+                result = sign_and_inject_from_rpc_forge(rpc, key, rpc_forged_hex)
+                log_error(f"[Attempt {attempt + 1}] ✅ Inject successful!")
 
                 if isinstance(result, dict):
                     return result.get("hash", str(result))
@@ -802,7 +1424,8 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
             except Exception as e:
                 last_error = e
                 if _is_counter_error(e) and attempt < max_retries:
-                    wait_time = 2.0 * (attempt + 1)
+                    # Conservative backoff for counter synchronization
+                    wait_time = 5.0 * (attempt + 1)  # 5s, 10s, 15s
                     log_error(f"Counter error on stake attempt {attempt + 1}, waiting {wait_time}s", exception=e)
                     time.sleep(wait_time)
                     continue
@@ -815,29 +1438,31 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
         if not _contains_unrevealed_key(e):
             raise
 
-        # Reveal with retry
+        # Reveal first
+        log_error("Wallet not revealed. Attempting reveal operation first...")
+
         def _inject_reveal_with_retry(max_retries: int = 3):
             last_error = None
             for attempt in range(max_retries + 1):
                 try:
-                    fresh_client = get_client(rpc, key=key)
+                    if attempt > 0:
+                        settling_time = 3.0
+                        log_error(f"Waiting {settling_time}s before reveal retry {attempt + 1}")
+                        time.sleep(settling_time)
+
+                    fresh_client = pytezos.using(shell=rpc, key=key)
                     op = fresh_client.reveal()
-                    try:
-                        op = op.autofill()
-                    except Exception as e:
-                        try:
-                            op = op.fill()
-                        except Exception:
-                            raise RuntimeError(f"Failed to prepare reveal: {e}") from e
+                    op = op.autofill()
                     op = op.sign()
                     result = op.inject()
+
                     if isinstance(result, dict):
                         return result.get("hash", str(result))
                     return str(result)
                 except Exception as e:
                     last_error = e
                     if _is_counter_error(e) and attempt < max_retries:
-                        wait_time = 2.0 * (attempt + 1)
+                        wait_time = 5.0 * (attempt + 1)
                         log_error(f"Counter error on reveal attempt {attempt + 1}, waiting {wait_time}s", exception=e)
                         time.sleep(wait_time)
                         continue
@@ -847,18 +1472,27 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
         try:
             reveal_oph = _inject_reveal_with_retry()
         except Exception as rev_e:
-            raise RuntimeError(f"Reveal failed: {rev_e}") from rev_e
+            raise RuntimeError(
+                f"Failed to reveal wallet public key. "
+                f"This wallet has never been used before and needs to reveal its public key first. "
+                f"Error: {rev_e}"
+            ) from rev_e
 
-        log_error(f"Reveal successful ({reveal_oph}), waiting 6s for propagation")
-        time.sleep(6)
+        log_error(f"Reveal successful ({reveal_oph}), waiting 8s for network propagation")
+        time.sleep(8)
 
+        log_error("Reveal complete. Retrying stake...")
         try:
             return _inject_with_retry()
         except Exception as stake_e:
-            raise RuntimeError(f"Stake failed after reveal ({reveal_oph}): {stake_e}") from stake_e
+            raise RuntimeError(
+                f"Stake failed after successful reveal (op: {reveal_oph}). "
+                f"This may be due to network delays. Please wait 1-2 minutes and try again. "
+                f"Error: {stake_e}"
+            ) from stake_e
 
 
-def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
+def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] = None, gas_limit: Optional[int] = None, storage_limit: Optional[int] = None) -> str:
     """
     Unstake XTZ from the current baker.
     Account must be staking.
@@ -867,10 +1501,39 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
         rpc: RPC endpoint
         key: Account private key
         amount_xtz: Amount to unstake in XTZ
+        fee_mutez: Optional transaction fee in mutez (defaults to 8000)
+        gas_limit: Optional gas limit (defaults to 30000)
+        storage_limit: Optional storage limit (defaults to 0)
 
     Returns:
         Operation hash (op...)
     """
+    # Get source address from key
+    source_address = key.public_key_hash()
+
+    # Check for pending operations BEFORE attempting
+    pending_info = check_pending_operations(rpc, source_address)
+    if pending_info and pending_info.get('has_pending'):
+        pending_count = pending_info.get('pending_count', 0)
+        raise RuntimeError(
+            f"Cannot unstake: {pending_count} pending operation(s) detected for this wallet. "
+            f"Please wait 1-2 minutes for them to confirm, then try again."
+        )
+
+    # Check if wallet is revealed (has made at least one operation)
+    if not is_wallet_revealed(rpc, source_address):
+        log_error(f"⚠️ Wallet {source_address[:10]}... is not revealed. Will attempt reveal operation first.")
+        # Note: We don't raise here - we let the normal flow handle the reveal
+
+    # Convert XTZ to mutez for transaction amount
+    amount_mutez = xtz_to_mutez(amount_xtz)
+
+    # Unstaking defaults - same as staking
+    # Use provided values or defaults
+    DEFAULT_UNSTAKE_FEE = fee_mutez if fee_mutez is not None else 8000       # ~0.008 XTZ (higher for safety)
+    DEFAULT_UNSTAKE_GAS = gas_limit if gas_limit is not None else 30000      # Conservative: 30k gas for unstaking
+    DEFAULT_UNSTAKE_STORAGE = storage_limit if storage_limit is not None else 0  # Unstaking doesn't need storage
+
     def _is_counter_error(e: Exception) -> bool:
         """Check if error is related to counter mismatch."""
         error_str = str(e).lower()
@@ -882,22 +1545,100 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
 
         for attempt in range(max_retries + 1):
             try:
-                # Create completely fresh client on each attempt
-                fresh_client = get_client(rpc, key=key)
-                op = fresh_client.unstake(amount_xtz)
+                # On retry attempts, wait for blockchain to settle
+                if attempt > 0:
+                    settling_time = 3.0
+                    log_error(f"Waiting {settling_time}s for blockchain to settle before retry {attempt + 1}")
+                    time.sleep(settling_time)
 
-                # Autofill
+                # Read counter from RPC (FRESH on each retry)
                 try:
-                    op = op.autofill()
-                except Exception as e:
-                    try:
-                        op = op.fill()
-                    except Exception:
-                        raise RuntimeError(f"Failed to prepare operation: {e}") from e
+                    rpc_counter = get_counter(rpc, source_address) - 1  # get_counter already adds +1
+                    log_error(f"[Attempt {attempt + 1}] RPC counter for {source_address[:10]}: {rpc_counter}")
+                    counter_to_use = rpc_counter + 1
+                    log_error(f"[Attempt {attempt + 1}] Will use counter: {counter_to_use}")
+                except Exception as counter_err:
+                    log_error(f"Failed to read counter from RPC", exception=counter_err)
+                    raise
 
-                # Sign and inject
-                op = op.sign()
-                result = op.inject()
+                # Check mempool for pending ops
+                try:
+                    pending_info = check_pending_operations(rpc, source_address)
+                    if pending_info and pending_info.get('has_pending'):
+                        log_error(f"⚠️ WARNING: {pending_info.get('pending_count', 0)} pending ops in mempool")
+                except Exception:
+                    pass
+
+                # Create completely fresh client with NO shared state
+                client = get_client(rpc, key=key)
+
+                # Get branch from head block
+                try:
+                    branch = client.shell.head.hash()
+                    log_error(f"[Attempt {attempt + 1}] Got branch: {branch}")
+                except Exception as branch_err:
+                    log_error(f"Failed to get branch", exception=branch_err)
+                    raise
+
+                # Build unstake operation payload manually for RPC forge
+                # Unstaking is a pseudo-operation: a transaction to self with 'unstake' entrypoint
+                log_error(f"[Attempt {attempt + 1}] Building unstake op: {amount_xtz} XTZ")
+
+                # Construct operation contents
+                op_contents = {
+                    'kind': 'transaction',  # Pseudo-operation via transaction
+                    'source': source_address,
+                    'destination': source_address,  # Self-transfer
+                    'fee': str(DEFAULT_UNSTAKE_FEE),
+                    'counter': str(counter_to_use),
+                    'gas_limit': str(DEFAULT_UNSTAKE_GAS),
+                    'storage_limit': str(DEFAULT_UNSTAKE_STORAGE),
+                    'amount': str(amount_mutez),
+                    'parameters': {
+                        'entrypoint': 'unstake',
+                        'value': {'prim': 'Unit'}
+                    }
+                }
+
+                log_error(f"[Attempt {attempt + 1}] Operation contents:")
+                log_error(f"  - kind: unstake")
+                log_error(f"  - counter: {counter_to_use}")
+                log_error(f"  - gas_limit: {DEFAULT_UNSTAKE_GAS}")
+                log_error(f"  - storage_limit: {DEFAULT_UNSTAKE_STORAGE}")
+                log_error(f"  - fee: {DEFAULT_UNSTAKE_FEE} mutez")
+                log_error(f"  - amount: {amount_mutez} mutez")
+
+                # Prepare payload for RPC forge
+                forge_payload = {
+                    'branch': branch,
+                    'contents': [op_contents]
+                }
+
+                # Get RPC forge
+                log_error(f"[Attempt {attempt + 1}] Requesting forge from RPC...")
+                try:
+                    forge_url = f"{rpc}/chains/main/blocks/head/helpers/forge/operations"
+                    forge_response = requests.post(
+                        forge_url,
+                        json=forge_payload,
+                        headers={'content-type': 'application/json'},
+                        timeout=30
+                    )
+
+                    if forge_response.status_code != 200:
+                        raise RuntimeError(f"RPC forge failed: {forge_response.status_code} - {forge_response.text}")
+
+                    rpc_forged_hex = forge_response.text.strip().strip('"')
+                    log_error(f"[Attempt {attempt + 1}] RPC forged bytes: {rpc_forged_hex}")
+
+                except Exception as forge_err:
+                    log_error(f"RPC forge request failed", exception=forge_err)
+                    raise RuntimeError(f"Failed to forge operation via RPC: {forge_err}")
+
+                # Sign and inject using RPC forge
+                log_error(f"[Attempt {attempt + 1}] Signing RPC-forged bytes...")
+                result = sign_and_inject_from_rpc_forge(rpc, key, rpc_forged_hex)
+                log_error(f"[Attempt {attempt + 1}] ✅ Inject successful!")
 
                 if isinstance(result, dict):
                     return result.get("hash", str(result))
@@ -906,7 +1647,8 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
             except Exception as e:
                 last_error = e
                 if _is_counter_error(e) and attempt < max_retries:
-                    wait_time = 2.0 * (attempt + 1)
+                    # Conservative backoff for counter synchronization
+                    wait_time = 5.0 * (attempt + 1)  # 5s, 10s, 15s
                     log_error(f"Counter error on unstake attempt {attempt + 1}, waiting {wait_time}s", exception=e)
                     time.sleep(wait_time)
                     continue
@@ -919,29 +1661,36 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
         if not _contains_unrevealed_key(e):
             raise
 
-        # Reveal with retry
+        # Reveal first
+        log_error("Wallet not revealed. Attempting reveal operation first...")
+
         def _inject_reveal_with_retry(max_retries: int = 3):
             last_error = None
             for attempt in range(max_retries + 1):
                 try:
-                    fresh_client = get_client(rpc, key=key)
+                    if attempt > 0:
+                        settling_time = 3.0
+                        log_error(f"Waiting {settling_time}s before reveal retry {attempt + 1}")
+                        time.sleep(settling_time)
+
+                    # Create fresh client with correct pattern
+                    fresh_client = pytezos.using(shell=rpc, key=key)
                     op = fresh_client.reveal()
-                    try:
-                        op = op.autofill()
-                    except Exception as e:
-                        try:
-                            op = op.fill()
-                        except Exception:
-                            raise RuntimeError(f"Failed to prepare reveal: {e}") from e
+
+                    # Trust autofill() completely - don't interfere
+                    op = op.autofill()
                     op = op.sign()
                     result = op.inject()
+
                     if isinstance(result, dict):
                         return result.get("hash", str(result))
                     return str(result)
+
                 except Exception as e:
                     last_error = e
                     if _is_counter_error(e) and attempt < max_retries:
-                        wait_time = 2.0 * (attempt + 1)
+                        # Conservative backoff for counter synchronization
+                        wait_time = 5.0 * (attempt + 1)  # 5s, 10s, 15s
                         log_error(f"Counter error on reveal attempt {attempt + 1}, waiting {wait_time}s", exception=e)
                         time.sleep(wait_time)
                         continue
@@ -951,10 +1700,14 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal) -> str:
         try:
             reveal_oph = _inject_reveal_with_retry()
         except Exception as rev_e:
-            raise RuntimeError(f"Reveal failed: {rev_e}") from rev_e
+            raise RuntimeError(
+                f"Failed to reveal wallet public key. "
+                f"This wallet has never been used before and needs to reveal its public key first. "
+                f"Error: {rev_e}"
+            ) from rev_e
 
-        log_error(f"Reveal successful ({reveal_oph}), waiting 6s for propagation")
-        time.sleep(6)
+        log_error(f"Reveal successful ({reveal_oph}), waiting 8s for network propagation")
+        time.sleep(8)
 
         try:
             return _inject_with_retry()
