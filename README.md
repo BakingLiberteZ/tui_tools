@@ -34,7 +34,7 @@ python -m sassy_wallet
 
 ## Why this exists
 
-Most wallets treat you like a baby. This one treats you like a baker.
+Most wallets treat you like a baby. This one treats you like a grownup baker.
 
 ## Warning (read me, chef)
 
