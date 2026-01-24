@@ -20,7 +20,7 @@ EMPTY_WALLET_MESSAGES = [
     "😭 It's SO empty in here! Press 'i' to import and fill this void!",
     "🏜️ Tumbleweed rolling by... Import a wallet, please! Press 'i'! ¬¬",
     "🤷 No wallets? Really? Come on, press 'i' to get started! ¬¬",
-    "💀 This bakery is DEAD without wallets! Import one NOW! ¬¬",
+    "🥐 This bakery is dead without croissants — import them now from France! 🇫🇷",
     "🎪 Welcome to the circus of NOTHING! Press 'i' to add a wallet! ¬¬",
     "😂 You opened a wallet app... with NO wallets. Bold move! ¬¬",
     "🦗 *Cricket sounds* ... Import a wallet? Maybe? Press 'i'? ¬¬",

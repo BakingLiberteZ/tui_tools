@@ -36,6 +36,7 @@ def _default_store() -> Dict[str, Any]:
         "accounts": [],
         "recent_to": [],  # Legacy, kept for backwards compatibility
         "recent_to_by_wallet": {},  # New: per-wallet recent destinations
+        "pending_ops": [],  # Persist pending operations across sessions
         "tx_prefs": {
             "advanced": False,
             "fee_xtz": "",
@@ -92,6 +93,10 @@ def load_store(path: Path = DEFAULT_PATH) -> Dict[str, Any]:
     # Recents by wallet (new structure)
     if "recent_to_by_wallet" not in data or not isinstance(data.get("recent_to_by_wallet"), dict):
         data["recent_to_by_wallet"] = {}
+
+    # Pending ops
+    if "pending_ops" not in data or not isinstance(data.get("pending_ops"), list):
+        data["pending_ops"] = []
 
     # Tx prefs
     if "tx_prefs" not in data or not isinstance(data.get("tx_prefs"), dict):

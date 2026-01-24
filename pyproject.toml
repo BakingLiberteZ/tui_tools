@@ -30,8 +30,10 @@ dependencies = [
     "textual>=0.47.0",
     "pytezos>=3.11.0",
     "cryptography>=41.0.0",
-    "argon2-cffi>=23.1.0",
     "base58>=2.1.1",
+    "requests>=2.31.0",
+    "mnemonic>=0.20",
+    "bip_utils>=2.7.0",
 ]
 
 [project.optional-dependencies]

@@ -7,16 +7,27 @@ import urllib.error
 import ssl
 import time
 import requests
+from threading import RLock
 
 from pytezos import pytezos
 from pytezos.crypto.key import Key
 from pytezos.crypto.encoding import base58_decode
 
-from .logger import safe_log_exception, log_error
+from .logger import safe_log_exception, log_error, log_debug, log_info, log_warning
 
 
 # Watermark for operation signing
 OPERATION_WATERMARK = b"\x03"
+_SSL_CONTEXT = ssl.create_default_context()
+_TZKT_ACCOUNT_CACHE_TTL = 30.0
+_tzkt_account_cache: dict[str, tuple[float, dict]] = {}
+_tzkt_account_cache_lock = RLock()
+_TZKT_HISTORY_CACHE_TTL = 10.0
+_tzkt_history_cache: dict[str, tuple[float, list]] = {}
+_tzkt_history_cache_lock = RLock()
+_TZKT_PUBLIC_BAKERS_CACHE_TTL = 300.0
+_tzkt_public_bakers_cache: dict[tuple[str, int], tuple[float, list]] = {}
+_tzkt_public_bakers_cache_lock = RLock()
 
 
 def inject_signed_operation(rpc: str, signed_op_hex: str) -> str:
@@ -39,14 +50,14 @@ def inject_signed_operation(rpc: str, signed_op_hex: str) -> str:
         method="POST"
     )
 
-    log_error(f"[INJECTION DEBUG] URL: {url}")
-    log_error(f"[INJECTION DEBUG] Body length: {len(data)} bytes")
-    log_error(f"[INJECTION DEBUG] Body first 100 chars: {data[:100]}")
+    log_debug(f"[INJECTION DEBUG] URL: {url}")
+    log_debug(f"[INJECTION DEBUG] Body length: {len(data)} bytes")
+    log_debug(f"[INJECTION DEBUG] Body first 100 chars: {data[:100]}")
 
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = resp.read().decode().strip().strip('"')
-            log_error(f"[INJECTION DEBUG] Success! Op hash: {result}")
+            log_debug(f"[INJECTION DEBUG] Success! Op hash: {result}")
             return result
     except urllib.error.HTTPError as e:
         error_body = e.read().decode() if e.fp else str(e)
@@ -79,24 +90,24 @@ def sign_and_inject_from_rpc_forge(rpc: str, key: Key, rpc_forged_hex: str) -> s
     sig_result = key.sign(watermarked, generic=True)
 
     # DEBUG logging BEFORE processing
-    log_error(f"[SIGNATURE DEBUG] sig_result type: {type(sig_result).__name__}")
-    log_error(f"[SIGNATURE DEBUG] sig_result repr: {repr(sig_result)[:100]}...")
-    log_error(f"[SIGNATURE DEBUG] sig_result is str: {isinstance(sig_result, str)}")
-    log_error(f"[SIGNATURE DEBUG] sig_result is bytes: {isinstance(sig_result, bytes)}")
+    log_debug(f"[SIGNATURE DEBUG] sig_result type: {type(sig_result).__name__}")
+    log_debug(f"[SIGNATURE DEBUG] sig_result repr: {repr(sig_result)[:100]}...")
+    log_debug(f"[SIGNATURE DEBUG] sig_result is str: {isinstance(sig_result, str)}")
+    log_debug(f"[SIGNATURE DEBUG] sig_result is bytes: {isinstance(sig_result, bytes)}")
 
     # 4) Convert to raw bytes (must be exactly 64 bytes)
     # ONLY decode if it's explicitly a string, otherwise treat as bytes
     if isinstance(sig_result, str):
         # Base58 string like "sigXXX...", decode it
-        log_error(f"[SIGNATURE DEBUG] Decoding as base58 string...")
-        sig_bytes = base58_decode(sig_result)
+        log_debug(f"[SIGNATURE DEBUG] Decoding as base58 string...")
+        sig_bytes = base58_decode(sig_result.encode("utf-8"))
     else:
         # Bytes or bytes-like object, use directly
-        log_error(f"[SIGNATURE DEBUG] Using as raw bytes...")
+        log_debug(f"[SIGNATURE DEBUG] Using as raw bytes...")
         sig_bytes = bytes(sig_result) if not isinstance(sig_result, bytes) else sig_result
 
-    log_error(f"[SIGNATURE DEBUG] sig_bytes length: {len(sig_bytes)} bytes")
-    log_error(f"[SIGNATURE DEBUG] sig_bytes hex: {sig_bytes.hex()}")
+    log_debug(f"[SIGNATURE DEBUG] sig_bytes length: {len(sig_bytes)} bytes")
+    log_debug(f"[SIGNATURE DEBUG] sig_bytes hex: {sig_bytes.hex()}")
 
     # CRITICAL CHECK: Must be exactly 64 bytes
     if len(sig_bytes) != 64:
@@ -106,11 +117,11 @@ def sign_and_inject_from_rpc_forge(rpc: str, key: Key, rpc_forged_hex: str) -> s
     signed_op_hex = rpc_forged_hex + sig_bytes.hex()
 
     # DEBUG: Verify concatenation
-    log_error(f"[SIGNATURE DEBUG] Forged part: {len(rpc_forged_hex)} chars")
-    log_error(f"[SIGNATURE DEBUG] Signature part: {len(sig_bytes.hex())} chars (should be 128)")
-    log_error(f"[SIGNATURE DEBUG] Total: {len(signed_op_hex)} chars (should be {len(rpc_forged_hex)} + 128)")
-    log_error(f"[SIGNATURE DEBUG] First 80: {signed_op_hex[:80]}")
-    log_error(f"[SIGNATURE DEBUG] Last 80: {signed_op_hex[-80:]}")
+    log_debug(f"[SIGNATURE DEBUG] Forged part: {len(rpc_forged_hex)} chars")
+    log_debug(f"[SIGNATURE DEBUG] Signature part: {len(sig_bytes.hex())} chars (should be 128)")
+    log_debug(f"[SIGNATURE DEBUG] Total: {len(signed_op_hex)} chars (should be {len(rpc_forged_hex)} + 128)")
+    log_debug(f"[SIGNATURE DEBUG] First 80: {signed_op_hex[:80]}")
+    log_debug(f"[SIGNATURE DEBUG] Last 80: {signed_op_hex[-80:]}")
 
     # CRITICAL CHECK: Total length must be correct
     expected_length = len(rpc_forged_hex) + 128  # 64 bytes = 128 hex chars
@@ -224,19 +235,13 @@ def get_delegation_info(rpc: str, address: str) -> Optional[str]:
     Get the baker address this account is delegated to.
     Returns None if not delegated.
     """
-    base = _tzkt_base_from_rpc(rpc)
-    url = f"{base}/v1/accounts/{address}"
-
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "sassy-wallet/1.3.0"},
-        method="GET",
-    )
-    data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+    data = _tzkt_get_account(rpc, address)
 
     # Check if delegated
     delegate = data.get("delegate")
-    if delegate and isinstance(delegate, dict):
+    if isinstance(delegate, str):
+        return delegate.strip() or None
+    if isinstance(delegate, dict):
         delegate_address = delegate.get("address")
         return delegate_address if delegate_address else None
 
@@ -249,19 +254,18 @@ def get_staking_balance(rpc: str, address: str) -> int:
     Get the staking balance (staked amount) for this account in mutez.
     Returns 0 if not staking or if information is unavailable.
     """
-    base = _tzkt_base_from_rpc(rpc)
-    url = f"{base}/v1/accounts/{address}"
-
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "sassy-wallet/1.3.0"},
-        method="GET",
-    )
-    data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+    data = _tzkt_get_account(rpc, address)
 
     # Get staked balance (if available)
-    staked_balance = data.get("stakedBalance", 0)
-    return int(staked_balance) if staked_balance else 0
+    staked_balance = data.get("stakedBalance")
+    if staked_balance is None:
+        staked_balance = data.get("stakingBalance")
+    if staked_balance is None:
+        staked_balance = data.get("staked_balance")
+    try:
+        return int(staked_balance) if staked_balance else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 @safe_log_exception(default_return=None, user_message="Failed to get baker info")
@@ -282,15 +286,7 @@ def get_baker_info(rpc: str, baker_address: str) -> Optional[dict]:
         }
         Or None if information is unavailable
     """
-    base = _tzkt_base_from_rpc(rpc)
-    url = f"{base}/v1/accounts/{baker_address}"
-
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "sassy-wallet/1.3.0"},
-        method="GET",
-    )
-    data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+    data = _tzkt_get_account(rpc, baker_address)
 
     if data is None:
         return None
@@ -352,6 +348,16 @@ def get_public_bakers(rpc: str, limit: int = 50) -> List[Dict[str, Any]]:
         ]
         Empty list if information is unavailable.
     """
+    now = time.time()
+    cache_key = (rpc, limit)
+    with _tzkt_public_bakers_cache_lock:
+        cached = _tzkt_public_bakers_cache.get(cache_key)
+        if cached:
+            ts, data = cached
+            if now - ts < _TZKT_PUBLIC_BAKERS_CACHE_TTL:
+                return data
+            _tzkt_public_bakers_cache.pop(cache_key, None)
+
     base = _tzkt_base_from_rpc(rpc)
 
     # Get active delegates sorted by staked balance (descending)
@@ -394,6 +400,8 @@ def get_public_bakers(rpc: str, limit: int = 50) -> List[Dict[str, Any]]:
             if len(bakers) >= limit:
                 break
 
+    with _tzkt_public_bakers_cache_lock:
+        _tzkt_public_bakers_cache[cache_key] = (now, bakers)
     return bakers
 
 
@@ -407,6 +415,32 @@ def xtz_to_mutez(x: Decimal) -> int:
 
 def key_from_encoded_secret(encoded: str) -> Key:
     return Key.from_encoded_key(encoded)
+
+
+def key_from_mnemonic_ledger(
+    mnemonic: str, passphrase: str = "", derivation_path: str = ""
+) -> Key:
+    """Derive a Tezos key from a BIP39 mnemonic using a derivation path."""
+    try:
+        from bip_utils import Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes
+    except Exception as e:
+        raise RuntimeError("bip_utils is required for mnemonic import") from e
+
+    seed = Bip39SeedGenerator(mnemonic).Generate(passphrase)
+    if derivation_path:
+        bip44_ctx = Bip44.FromSeedAndPath(seed, derivation_path)
+        bip44_acc = bip44_ctx
+    else:
+        bip44_ctx = Bip44.FromSeed(seed, Bip44Coins.TEZOS)
+        bip44_acc = (
+            bip44_ctx.Purpose()
+            .Coin()
+            .Account(0)
+            .Change(Bip44Changes.CHAIN_EXT)
+            .AddressIndex(0)
+        )
+    secret_exponent = bip44_acc.PrivateKey().Raw().ToBytes()
+    return Key.from_secret_exponent(secret_exponent, curve=b"ed")
 
 
 def _contains_unrevealed_key(err: Any) -> bool:
@@ -457,16 +491,48 @@ def _tzkt_base_from_rpc(rpc: str) -> str:
     return "https://api.tzkt.io"
 
 
-def _urlopen_json_with_retries(req: urllib.request.Request, timeout: int = 15, retries: int = 3) -> Dict[str, Any]:
+def _tzkt_get_account(rpc: str, address: str) -> dict:
+    base = _tzkt_base_from_rpc(rpc)
+    url = f"{base}/v1/accounts/{address}"
+
+    now = time.time()
+    with _tzkt_account_cache_lock:
+        cached = _tzkt_account_cache.get(url)
+        if cached:
+            ts, data = cached
+            if now - ts < _TZKT_ACCOUNT_CACHE_TTL:
+                return data
+            _tzkt_account_cache.pop(url, None)
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "sassy-wallet/1.3.0"},
+        method="GET",
+    )
+    data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+    if not isinstance(data, dict):
+        log_warning("Unexpected TzKT response type", url=url, response_type=type(data).__name__)
+        return {}
+
+    resp_address = data.get("address")
+    if not isinstance(resp_address, str) or resp_address != address:
+        log_warning("TzKT response missing or mismatched address", url=url, response_address=resp_address)
+        return {}
+
+    with _tzkt_account_cache_lock:
+        _tzkt_account_cache[url] = (now, data)
+    return data
+
+
+def _urlopen_json_with_retries(req: urllib.request.Request, timeout: int = 15, retries: int = 3) -> Any:
     """
     Fetch JSON via urllib with a few retries to smooth out transient TLS/EOF issues.
     Returns parsed JSON (typically a dict).
     """
-    ctx = ssl.create_default_context()
     last_err: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
                 data = resp.read().decode("utf-8")
             return json.loads(data)
         except (ssl.SSLError, urllib.error.URLError, ConnectionError, TimeoutError) as e:
@@ -489,31 +555,140 @@ def _urlopen_json_with_retries(req: urllib.request.Request, timeout: int = 15, r
 
 def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, Any]]:
     base = _tzkt_base_from_rpc(rpc)
-    endpoint = f"{base}/v1/operations/transactions"
 
-    params = {
+    tx_params = {
         "anyof.sender.target": address,
         "status": "applied",
-        "limit": str(limit),
+        "limit": str(limit * 2),
+        "sort.desc": "level",
+        "withMetadata": "true",
+    }
+    tx_url = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(tx_params)
+
+    stake_params = {
+        "sender": address,
+        "entrypoint": "stake",
+        "status": "applied",
+        "limit": str(limit * 2),
+        "sort.desc": "level",
+        "withMetadata": "true",
+    }
+    stake_url = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(stake_params)
+
+    unstake_params = {
+        "sender": address,
+        "entrypoint": "unstake",
+        "status": "applied",
+        "limit": str(limit * 2),
+        "sort.desc": "level",
+        "withMetadata": "true",
+    }
+    unstake_url = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(unstake_params)
+
+    deleg_params = {
+        "sender": address,
+        "status": "applied",
+        "limit": str(limit * 2),
         "sort.desc": "level",
     }
+    deleg_url = f"{base}/v1/operations/delegations?" + urllib.parse.urlencode(deleg_params)
 
-    url = endpoint + "?" + urllib.parse.urlencode(params)
+    now = time.time()
+    cache_key = f"{tx_url}|{stake_url}|{unstake_url}|{deleg_url}"
+    with _tzkt_history_cache_lock:
+        cached = _tzkt_history_cache.get(cache_key)
+        if cached:
+            ts, data = cached
+            if now - ts < _TZKT_HISTORY_CACHE_TTL:
+                return data
+            _tzkt_history_cache.pop(cache_key, None)
 
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "sassy-wallet/1.3.0"},
-        method="GET",
-    )
-    items = _urlopen_json_with_retries(req, timeout=15, retries=3)
+    def _fetch_list(url: str) -> list[dict]:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "sassy-wallet/1.3.0"},
+            method="GET",
+        )
+        data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+        return data if isinstance(data, list) else []
+
+    tx_items = _fetch_list(tx_url)
+    stake_items = _fetch_list(stake_url)
+    unstake_items = _fetch_list(unstake_url)
+    deleg_items = _fetch_list(deleg_url)
     out: list[dict] = []
+    seen_hashes: set[str] = set()
 
-    for it in items:
-        sender = (it.get("sender") or {}).get("address")
-        target = (it.get("target") or {}).get("address")
+    def _delegate_from_updates(updates: list[dict]) -> str:
+        for upd in updates:
+            if not isinstance(upd, dict):
+                continue
+            if upd.get("kind") == "freezer" and upd.get("category") == "deposits":
+                staker = upd.get("staker")
+                if isinstance(staker, dict):
+                    delegate = staker.get("delegate")
+                    if isinstance(delegate, str):
+                        return delegate
+            if upd.get("kind") == "staking" and isinstance(upd.get("delegate"), str):
+                return upd.get("delegate")
+        return ""
+
+    def _format_baker_label(baker_addr: str) -> str:
+        if not baker_addr:
+            return "?"
+        info = get_baker_info(rpc, baker_addr)
+        alias = info.get("alias") if info else None
+        if alias:
+            return alias
+        return baker_addr
+
+    def _extract_delegate(it: dict) -> tuple[str, str]:
+        for key in ("newDelegate", "delegate", "target", "destination"):
+            val = it.get(key)
+            if isinstance(val, dict):
+                addr = val.get("address") or ""
+                alias = val.get("alias") or ""
+                return addr, alias
+            if isinstance(val, str):
+                return val, ""
+        return "", ""
+
+    def _extract_addr(it: dict, *keys: str) -> str:
+        for key in keys:
+            val = it.get(key)
+            if isinstance(val, dict):
+                addr = val.get("address")
+                if isinstance(addr, str):
+                    return addr
+            elif isinstance(val, str):
+                return val
+        return ""
+
+    for it in tx_items:
+        sender = _extract_addr(it, "sender", "source")
+        target = _extract_addr(it, "target", "destination")
         amount_mutez = int(it.get("amount") or 0)
+        params = it.get("parameter") or it.get("parameters") or {}
+        entrypoint = params.get("entrypoint") if isinstance(params, dict) else None
+        metadata = it.get("metadata") or {}
+        op_res = metadata.get("operation_result") or {}
+        updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
 
-        if sender == address:
+        if sender == address and target == address and entrypoint == "stake":
+            direction = "STK"
+            baker_addr = _delegate_from_updates(updates)
+            if not baker_addr:
+                baker_addr = get_delegation_info(rpc, address) or ""
+            counterparty = _format_baker_label(baker_addr)
+            baker_label = counterparty
+        elif sender == address and target == address and entrypoint == "unstake":
+            direction = "UST"
+            baker_addr = _delegate_from_updates(updates)
+            if not baker_addr:
+                baker_addr = get_delegation_info(rpc, address) or ""
+            counterparty = _format_baker_label(baker_addr)
+            baker_label = counterparty
+        elif sender == address:
             direction = "OUT"
             counterparty = target or "?"
         elif target == address:
@@ -523,17 +698,230 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             direction = "?"
             counterparty = "?"
 
+        item = {
+            "ts": it.get("timestamp") or "",
+            "direction": direction,
+            "amount_xtz": mutez_to_xtz(amount_mutez),
+            "counterparty": counterparty,
+            "hash": it.get("hash") or "",
+            "kind": "transaction",
+            "entrypoint": entrypoint or "",
+        }
+        if direction in ("STK", "UST"):
+            item["baker"] = baker_label
+        if item["hash"]:
+            seen_hashes.add(item["hash"])
+        out.append(item)
+
+    for it in stake_items:
+        h = it.get("hash") or ""
+        if h in seen_hashes:
+            continue
+        amount_mutez = int(it.get("amount") or 0)
+        metadata = it.get("metadata") or {}
+        op_res = metadata.get("operation_result") or {}
+        updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
+        baker_addr = _delegate_from_updates(updates)
+        if not baker_addr:
+            baker_addr = get_delegation_info(rpc, address) or ""
+        counterparty = _format_baker_label(baker_addr)
+        item = {
+            "ts": it.get("timestamp") or "",
+            "direction": "STK",
+            "amount_xtz": mutez_to_xtz(amount_mutez),
+            "counterparty": counterparty,
+            "hash": h,
+            "kind": "transaction",
+            "entrypoint": "stake",
+            "baker": counterparty,
+        }
+        if h:
+            seen_hashes.add(h)
+        out.append(item)
+
+    for it in unstake_items:
+        h = it.get("hash") or ""
+        if h in seen_hashes:
+            continue
+        amount_mutez = int(it.get("amount") or 0)
+        metadata = it.get("metadata") or {}
+        op_res = metadata.get("operation_result") or {}
+        updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
+        baker_addr = _delegate_from_updates(updates)
+        if not baker_addr:
+            baker_addr = get_delegation_info(rpc, address) or ""
+        counterparty = _format_baker_label(baker_addr)
+        item = {
+            "ts": it.get("timestamp") or "",
+            "direction": "UST",
+            "amount_xtz": mutez_to_xtz(amount_mutez),
+            "counterparty": counterparty,
+            "hash": h,
+            "kind": "transaction",
+            "entrypoint": "unstake",
+            "baker": counterparty,
+        }
+        if h:
+            seen_hashes.add(h)
+        out.append(item)
+
+    for it in deleg_items:
+        delegate_addr, delegate_alias = _extract_delegate(it)
+        direction = "DEL" if delegate_addr else "UND"
+        if delegate_alias:
+            counterparty = delegate_alias
+        elif delegate_addr:
+            counterparty = _format_baker_label(delegate_addr)
+        else:
+            counterparty = "—"
+
         out.append(
             {
                 "ts": it.get("timestamp") or "",
                 "direction": direction,
-                "amount_xtz": mutez_to_xtz(amount_mutez),
+                "amount_xtz": Decimal(0),
                 "counterparty": counterparty,
                 "hash": it.get("hash") or "",
+                "kind": "delegation",
             }
         )
 
+    out.sort(key=lambda x: x.get("ts") or "", reverse=True)
+    out = out[:limit]
+
+    with _tzkt_history_cache_lock:
+        _tzkt_history_cache[cache_key] = (now, out)
     return out
+
+
+def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, Any]]:
+    """Resolve a transaction by hash from TzKT and format it for history."""
+    if not oph:
+        return None
+    base = _tzkt_base_from_rpc(rpc)
+    params = {
+        "hash": oph,
+        "limit": "1",
+        "withMetadata": "true",
+    }
+    url = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(params)
+
+    def _extract_addr(it: dict, *keys: str) -> str:
+        for key in keys:
+            val = it.get(key)
+            if isinstance(val, dict):
+                addr = val.get("address")
+                if isinstance(addr, str):
+                    return addr
+            elif isinstance(val, str):
+                return val
+        return ""
+
+    def _delegate_from_updates(updates: list[dict]) -> str:
+        for upd in updates:
+            if not isinstance(upd, dict):
+                continue
+            if upd.get("kind") == "freezer" and upd.get("category") == "deposits":
+                staker = upd.get("staker")
+                if isinstance(staker, dict):
+                    delegate = staker.get("delegate")
+                    if isinstance(delegate, str):
+                        return delegate
+            if upd.get("kind") == "staking" and isinstance(upd.get("delegate"), str):
+                return upd.get("delegate")
+        return ""
+
+    def _format_baker_label(baker_addr: str) -> str:
+        if not baker_addr:
+            return "?"
+        info = get_baker_info(rpc, baker_addr)
+        alias = info.get("alias") if info else None
+        return alias or baker_addr
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "sassy-wallet/1.3.0"},
+            method="GET",
+        )
+        data = _urlopen_json_with_retries(req, timeout=15, retries=2)
+        if not isinstance(data, list) or not data:
+            data = None
+        it = data[0]
+    except Exception:
+        it = None
+
+    if it is None:
+        # Fallback: generic operations endpoint
+        try:
+            url = f"{base}/v1/operations/{oph}"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "sassy-wallet/1.3.0"},
+                method="GET",
+            )
+            data = _urlopen_json_with_retries(req, timeout=15, retries=2)
+            if isinstance(data, list) and data:
+                it = data[0]
+        except Exception:
+            return None
+        if it is None:
+            return None
+
+    sender = _extract_addr(it, "sender", "source")
+    target = _extract_addr(it, "target", "destination")
+    if sender != address and target != address:
+        return None
+    amount_mutez = int(it.get("amount") or 0)
+    params = it.get("parameter") or it.get("parameters") or {}
+    entrypoint = params.get("entrypoint") if isinstance(params, dict) else None
+    metadata = it.get("metadata") or {}
+    op_res = metadata.get("operation_result") or {}
+    updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
+
+    if sender == address and target == address and entrypoint == "stake":
+        direction = "STK"
+        baker_addr = _delegate_from_updates(updates)
+        if not baker_addr:
+            baker_addr = get_delegation_info(rpc, address) or ""
+        counterparty = _format_baker_label(baker_addr)
+        baker_label = counterparty
+    elif sender == address and target == address and entrypoint == "unstake":
+        direction = "UST"
+        baker_addr = _delegate_from_updates(updates)
+        if not baker_addr:
+            baker_addr = get_delegation_info(rpc, address) or ""
+        counterparty = _format_baker_label(baker_addr)
+        baker_label = counterparty
+    elif sender == address:
+        direction = "OUT"
+        counterparty = target or "?"
+    elif target == address:
+        direction = "IN"
+        counterparty = sender or "?"
+    else:
+        direction = "?"
+        counterparty = "?"
+
+    item = {
+        "ts": it.get("timestamp") or "",
+        "direction": direction,
+        "amount_xtz": mutez_to_xtz(amount_mutez),
+        "counterparty": counterparty,
+        "hash": it.get("hash") or "",
+        "kind": "transaction",
+        "entrypoint": entrypoint or "",
+        "status": (it.get("status") or "CONFIRMED").upper(),
+    }
+    if direction in ("STK", "UST"):
+        item["baker"] = baker_label
+    return item
+
+
+def invalidate_history_cache() -> None:
+    """Clear cached TzKT history data."""
+    with _tzkt_history_cache_lock:
+        _tzkt_history_cache.clear()
 
 
 # ---------------------------------------------------------------------
@@ -918,6 +1306,12 @@ def _is_missing_helpers(err: Exception) -> bool:
     )
 
 
+def _is_unsupported_manager_op(err: Exception | str) -> bool:
+    """Detect RPC/protocol errors when a manager operation kind is unsupported."""
+    s = str(err)
+    return "No case matched" in s and "At /kind" in s and "unexpected string" in s
+
+
 def send_xtz(
     rpc: str,
     key: Key,
@@ -1114,7 +1508,7 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
 
     # Check if wallet is revealed (has made at least one operation)
     if not is_wallet_revealed(rpc, source_address):
-        log_error(f"⚠️ Wallet {source_address[:10]}... is not revealed. Will attempt reveal operation first.")
+        log_warning(f"⚠️ Wallet {source_address[:10]}... is not revealed. Will attempt reveal operation first.")
         # Note: We don't raise here - we let the normal flow handle the reveal
         # This is just a proactive warning logged for user awareness
 
@@ -1141,7 +1535,7 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
                 # On retry attempts, wait for blockchain to settle
                 if attempt > 0:
                     settling_time = 3.0  # Wait for blockchain to process previous attempt
-                    log_error(f"Waiting {settling_time}s for blockchain to settle before retry {attempt + 1}")
+                    log_debug(f"Waiting {settling_time}s for blockchain to settle before retry {attempt + 1}")
                     time.sleep(settling_time)
 
                 # Create completely fresh client with NO shared state
@@ -1196,7 +1590,7 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
             raise
 
         # Reveal first (also with retry logic)
-        log_error("Wallet not revealed. Attempting reveal operation first...")
+        log_warning("Wallet not revealed. Attempting reveal operation first...")
 
         def _inject_reveal_with_retry(max_retries: int = 3):
             last_error = None
@@ -1205,7 +1599,7 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
                     # Wait before retry
                     if attempt > 0:
                         settling_time = 3.0
-                        log_error(f"Waiting {settling_time}s before reveal retry {attempt + 1}")
+                        log_debug(f"Waiting {settling_time}s before reveal retry {attempt + 1}")
                         time.sleep(settling_time)
 
                     # Create fresh client with NO shared state
@@ -1244,11 +1638,11 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
             ) from rev_e
 
         # Wait longer for reveal to propagate through the network
-        log_error(f"Reveal successful ({reveal_oph}), waiting 8s for network propagation")
+        log_info(f"Reveal successful ({reveal_oph}), waiting 8s for network propagation")
         time.sleep(8)
 
         # Retry delegation with fresh client after reveal
-        log_error("Reveal complete. Retrying delegation...")
+        log_info("Reveal complete. Retrying delegation...")
         try:
             return _inject_with_retry()
         except Exception as del_e:
@@ -1289,7 +1683,7 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
 
     # Check if wallet is revealed (has made at least one operation)
     if not is_wallet_revealed(rpc, source_address):
-        log_error(f"⚠️ Wallet {source_address[:10]}... is not revealed. Will attempt reveal operation first.")
+        log_warning(f"⚠️ Wallet {source_address[:10]}... is not revealed. Will attempt reveal operation first.")
         # Note: We don't raise here - we let the normal flow handle the reveal
 
     def _is_counter_error(e: Exception) -> bool:
@@ -1315,15 +1709,15 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
                 # On retry attempts, wait for blockchain to settle
                 if attempt > 0:
                     settling_time = 3.0
-                    log_error(f"Waiting {settling_time}s for blockchain to settle before retry {attempt + 1}")
+                    log_debug(f"Waiting {settling_time}s for blockchain to settle before retry {attempt + 1}")
                     time.sleep(settling_time)
 
                 # Read counter from RPC (FRESH on each retry)
                 try:
                     rpc_counter = get_counter(rpc, source_address) - 1  # get_counter already adds +1
-                    log_error(f"[Attempt {attempt + 1}] RPC counter for {source_address[:10]}: {rpc_counter}")
+                    log_debug(f"[Attempt {attempt + 1}] RPC counter for {source_address[:10]}: {rpc_counter}")
                     counter_to_use = rpc_counter + 1
-                    log_error(f"[Attempt {attempt + 1}] Will use counter: {counter_to_use}")
+                    log_debug(f"[Attempt {attempt + 1}] Will use counter: {counter_to_use}")
                 except Exception as counter_err:
                     log_error(f"Failed to read counter from RPC", exception=counter_err)
                     raise
@@ -1332,7 +1726,7 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
                 try:
                     pending_info = check_pending_operations(rpc, source_address)
                     if pending_info and pending_info.get('has_pending'):
-                        log_error(f"⚠️ WARNING: {pending_info.get('pending_count', 0)} pending ops in mempool")
+                        log_warning(f"⚠️ WARNING: {pending_info.get('pending_count', 0)} pending ops in mempool")
                 except Exception:
                     pass
 
@@ -1343,57 +1737,32 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
                 # PRUEBA 0: Verificar que key corresponde al source
                 # ============================================================
                 key_pkh = key.public_key_hash()
-                log_error(f"[DEBUG] source_address: {source_address}")
-                log_error(f"[DEBUG] key.public_key_hash(): {key_pkh}")
+                log_debug(f"[DEBUG] source_address: {source_address}")
+                log_debug(f"[DEBUG] key.public_key_hash(): {key_pkh}")
                 if source_address != key_pkh:
                     raise RuntimeError(f"KEY MISMATCH! source={source_address} but key.pkh={key_pkh}")
-                log_error(f"[DEBUG] ✅ Key matches source address")
+                log_debug(f"[DEBUG] ✅ Key matches source address")
 
                 # Get branch from head block
                 try:
                     branch = client.shell.head.hash()
-                    log_error(f"[Attempt {attempt + 1}] Got branch: {branch}")
+                    log_debug(f"[Attempt {attempt + 1}] Got branch: {branch}")
                 except Exception as branch_err:
                     log_error(f"Failed to get branch", exception=branch_err)
                     raise
 
-                # Build stake operation payload manually for RPC forge
-                # Staking is a pseudo-operation: a transaction to self with 'stake' entrypoint
-                log_error(f"[Attempt {attempt + 1}] Building stake op: {amount_xtz} XTZ")
+                def _forge_and_inject(op_contents: dict, *, label: str) -> str:
+                    log_debug(f"[Attempt {attempt + 1}] Operation contents ({label}):")
+                    log_debug(f"  - kind: {op_contents.get('kind')}")
+                    log_debug(f"  - counter: {counter_to_use}")
+                    log_debug(f"  - gas_limit: {DEFAULT_STAKE_GAS}")
+                    log_debug(f"  - storage_limit: {DEFAULT_STAKE_STORAGE}")
+                    log_debug(f"  - fee: {DEFAULT_STAKE_FEE} mutez")
+                    log_debug(f"  - amount: {amount_mutez} mutez")
 
-                # Construct operation contents
-                op_contents = {
-                    'kind': 'transaction',  # Pseudo-operation via transaction
-                    'source': source_address,
-                    'destination': source_address,  # Self-transfer
-                    'fee': str(DEFAULT_STAKE_FEE),
-                    'counter': str(counter_to_use),
-                    'gas_limit': str(DEFAULT_STAKE_GAS),
-                    'storage_limit': str(DEFAULT_STAKE_STORAGE),
-                    'amount': str(amount_mutez),
-                    'parameters': {
-                        'entrypoint': 'stake',
-                        'value': {'prim': 'Unit'}
-                    }
-                }
+                    forge_payload = {"branch": branch, "contents": [op_contents]}
+                    log_debug(f"[Attempt {attempt + 1}] Requesting forge from RPC ({label})...")
 
-                log_error(f"[Attempt {attempt + 1}] Operation contents:")
-                log_error(f"  - kind: stake")
-                log_error(f"  - counter: {counter_to_use}")
-                log_error(f"  - gas_limit: {DEFAULT_STAKE_GAS}")
-                log_error(f"  - storage_limit: {DEFAULT_STAKE_STORAGE}")
-                log_error(f"  - fee: {DEFAULT_STAKE_FEE} mutez")
-                log_error(f"  - amount: {amount_mutez} mutez")
-
-                # Prepare payload for RPC forge
-                forge_payload = {
-                    'branch': branch,
-                    'contents': [op_contents]
-                }
-
-                # Get RPC forge
-                log_error(f"[Attempt {attempt + 1}] Requesting forge from RPC...")
-                try:
                     forge_url = f"{rpc}/chains/main/blocks/head/helpers/forge/operations"
                     forge_response = requests.post(
                         forge_url,
@@ -1403,22 +1772,53 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
                     )
 
                     if forge_response.status_code != 200:
-                        raise RuntimeError(f"RPC forge failed: {forge_response.status_code} - {forge_response.text}")
+                        raise RuntimeError(f"RPC forge failed ({label}): {forge_response.status_code} - {forge_response.text}")
 
                     rpc_forged_hex = forge_response.text.strip().strip('"')
-                    log_error(f"[Attempt {attempt + 1}] RPC forged bytes: {rpc_forged_hex}")
+                    log_debug(f"[Attempt {attempt + 1}] RPC forged bytes ({label}): {rpc_forged_hex}")
 
-                except Exception as forge_err:
-                    log_error(f"RPC forge request failed", exception=forge_err)
-                    raise RuntimeError(f"Failed to forge operation via RPC: {forge_err}")
+                    log_debug(f"[Attempt {attempt + 1}] Signing RPC-forged bytes ({label})...")
+                    result = sign_and_inject_from_rpc_forge(rpc, key, rpc_forged_hex)
+                    log_info(f"[Attempt {attempt + 1}] ✅ Inject successful ({label})!")
+                    return result if not isinstance(result, dict) else result.get("hash", str(result))
 
-                # Sign and inject using RPC forge
-                log_error(f"[Attempt {attempt + 1}] Signing RPC-forged bytes...")
-                result = sign_and_inject_from_rpc_forge(rpc, key, rpc_forged_hex)
-                log_error(f"[Attempt {attempt + 1}] ✅ Inject successful!")
+                log_debug(f"[Attempt {attempt + 1}] Building stake op: {amount_xtz} XTZ")
 
-                if isinstance(result, dict):
-                    return result.get("hash", str(result))
+                stake_op = {
+                    'kind': 'stake',
+                    'source': source_address,
+                    'fee': str(DEFAULT_STAKE_FEE),
+                    'counter': str(counter_to_use),
+                    'gas_limit': str(DEFAULT_STAKE_GAS),
+                    'storage_limit': str(DEFAULT_STAKE_STORAGE),
+                    'amount': str(amount_mutez),
+                }
+
+                legacy_op = {
+                    'kind': 'transaction',
+                    'source': source_address,
+                    'destination': source_address,
+                    'fee': str(DEFAULT_STAKE_FEE),
+                    'counter': str(counter_to_use),
+                    'gas_limit': str(DEFAULT_STAKE_GAS),
+                    'storage_limit': str(DEFAULT_STAKE_STORAGE),
+                    'amount': str(amount_mutez),
+                    'parameters': {'entrypoint': 'stake', 'value': {'prim': 'Unit'}},
+                }
+
+                try:
+                    result = _forge_and_inject(legacy_op, label="stake-legacy")
+                except Exception as legacy_err:
+                    log_warning("Legacy stake transaction failed, trying stake op", exception=legacy_err)
+                    try:
+                        result = _forge_and_inject(stake_op, label="stake-op")
+                    except Exception as stake_err:
+                        if _is_unsupported_manager_op(stake_err):
+                            raise RuntimeError(
+                                "RPC/protocol does not support stake operations on this network."
+                            ) from stake_err
+                        raise
+
                 return str(result)
 
             except Exception as e:
@@ -1439,7 +1839,7 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
             raise
 
         # Reveal first
-        log_error("Wallet not revealed. Attempting reveal operation first...")
+        log_warning("Wallet not revealed. Attempting reveal operation first...")
 
         def _inject_reveal_with_retry(max_retries: int = 3):
             last_error = None
@@ -1447,7 +1847,7 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
                 try:
                     if attempt > 0:
                         settling_time = 3.0
-                        log_error(f"Waiting {settling_time}s before reveal retry {attempt + 1}")
+                        log_debug(f"Waiting {settling_time}s before reveal retry {attempt + 1}")
                         time.sleep(settling_time)
 
                     fresh_client = pytezos.using(shell=rpc, key=key)
@@ -1478,10 +1878,10 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
                 f"Error: {rev_e}"
             ) from rev_e
 
-        log_error(f"Reveal successful ({reveal_oph}), waiting 8s for network propagation")
+        log_info(f"Reveal successful ({reveal_oph}), waiting 8s for network propagation")
         time.sleep(8)
 
-        log_error("Reveal complete. Retrying stake...")
+        log_info("Reveal complete. Retrying stake...")
         try:
             return _inject_with_retry()
         except Exception as stake_e:
@@ -1522,7 +1922,7 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
 
     # Check if wallet is revealed (has made at least one operation)
     if not is_wallet_revealed(rpc, source_address):
-        log_error(f"⚠️ Wallet {source_address[:10]}... is not revealed. Will attempt reveal operation first.")
+        log_warning(f"⚠️ Wallet {source_address[:10]}... is not revealed. Will attempt reveal operation first.")
         # Note: We don't raise here - we let the normal flow handle the reveal
 
     # Convert XTZ to mutez for transaction amount
@@ -1548,15 +1948,15 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
                 # On retry attempts, wait for blockchain to settle
                 if attempt > 0:
                     settling_time = 3.0
-                    log_error(f"Waiting {settling_time}s for blockchain to settle before retry {attempt + 1}")
+                    log_debug(f"Waiting {settling_time}s for blockchain to settle before retry {attempt + 1}")
                     time.sleep(settling_time)
 
                 # Read counter from RPC (FRESH on each retry)
                 try:
                     rpc_counter = get_counter(rpc, source_address) - 1  # get_counter already adds +1
-                    log_error(f"[Attempt {attempt + 1}] RPC counter for {source_address[:10]}: {rpc_counter}")
+                    log_debug(f"[Attempt {attempt + 1}] RPC counter for {source_address[:10]}: {rpc_counter}")
                     counter_to_use = rpc_counter + 1
-                    log_error(f"[Attempt {attempt + 1}] Will use counter: {counter_to_use}")
+                    log_debug(f"[Attempt {attempt + 1}] Will use counter: {counter_to_use}")
                 except Exception as counter_err:
                     log_error(f"Failed to read counter from RPC", exception=counter_err)
                     raise
@@ -1565,7 +1965,7 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
                 try:
                     pending_info = check_pending_operations(rpc, source_address)
                     if pending_info and pending_info.get('has_pending'):
-                        log_error(f"⚠️ WARNING: {pending_info.get('pending_count', 0)} pending ops in mempool")
+                        log_warning(f"⚠️ WARNING: {pending_info.get('pending_count', 0)} pending ops in mempool")
                 except Exception:
                     pass
 
@@ -1575,48 +1975,23 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
                 # Get branch from head block
                 try:
                     branch = client.shell.head.hash()
-                    log_error(f"[Attempt {attempt + 1}] Got branch: {branch}")
+                    log_debug(f"[Attempt {attempt + 1}] Got branch: {branch}")
                 except Exception as branch_err:
                     log_error(f"Failed to get branch", exception=branch_err)
                     raise
 
-                # Build unstake operation payload manually for RPC forge
-                # Unstaking is a pseudo-operation: a transaction to self with 'unstake' entrypoint
-                log_error(f"[Attempt {attempt + 1}] Building unstake op: {amount_xtz} XTZ")
+                def _forge_and_inject(op_contents: dict, *, label: str) -> str:
+                    log_debug(f"[Attempt {attempt + 1}] Operation contents ({label}):")
+                    log_debug(f"  - kind: {op_contents.get('kind')}")
+                    log_debug(f"  - counter: {counter_to_use}")
+                    log_debug(f"  - gas_limit: {DEFAULT_UNSTAKE_GAS}")
+                    log_debug(f"  - storage_limit: {DEFAULT_UNSTAKE_STORAGE}")
+                    log_debug(f"  - fee: {DEFAULT_UNSTAKE_FEE} mutez")
+                    log_debug(f"  - amount: {amount_mutez} mutez")
 
-                # Construct operation contents
-                op_contents = {
-                    'kind': 'transaction',  # Pseudo-operation via transaction
-                    'source': source_address,
-                    'destination': source_address,  # Self-transfer
-                    'fee': str(DEFAULT_UNSTAKE_FEE),
-                    'counter': str(counter_to_use),
-                    'gas_limit': str(DEFAULT_UNSTAKE_GAS),
-                    'storage_limit': str(DEFAULT_UNSTAKE_STORAGE),
-                    'amount': str(amount_mutez),
-                    'parameters': {
-                        'entrypoint': 'unstake',
-                        'value': {'prim': 'Unit'}
-                    }
-                }
+                    forge_payload = {"branch": branch, "contents": [op_contents]}
+                    log_debug(f"[Attempt {attempt + 1}] Requesting forge from RPC ({label})...")
 
-                log_error(f"[Attempt {attempt + 1}] Operation contents:")
-                log_error(f"  - kind: unstake")
-                log_error(f"  - counter: {counter_to_use}")
-                log_error(f"  - gas_limit: {DEFAULT_UNSTAKE_GAS}")
-                log_error(f"  - storage_limit: {DEFAULT_UNSTAKE_STORAGE}")
-                log_error(f"  - fee: {DEFAULT_UNSTAKE_FEE} mutez")
-                log_error(f"  - amount: {amount_mutez} mutez")
-
-                # Prepare payload for RPC forge
-                forge_payload = {
-                    'branch': branch,
-                    'contents': [op_contents]
-                }
-
-                # Get RPC forge
-                log_error(f"[Attempt {attempt + 1}] Requesting forge from RPC...")
-                try:
                     forge_url = f"{rpc}/chains/main/blocks/head/helpers/forge/operations"
                     forge_response = requests.post(
                         forge_url,
@@ -1626,22 +2001,53 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
                     )
 
                     if forge_response.status_code != 200:
-                        raise RuntimeError(f"RPC forge failed: {forge_response.status_code} - {forge_response.text}")
+                        raise RuntimeError(f"RPC forge failed ({label}): {forge_response.status_code} - {forge_response.text}")
 
                     rpc_forged_hex = forge_response.text.strip().strip('"')
-                    log_error(f"[Attempt {attempt + 1}] RPC forged bytes: {rpc_forged_hex}")
+                    log_debug(f"[Attempt {attempt + 1}] RPC forged bytes ({label}): {rpc_forged_hex}")
 
-                except Exception as forge_err:
-                    log_error(f"RPC forge request failed", exception=forge_err)
-                    raise RuntimeError(f"Failed to forge operation via RPC: {forge_err}")
+                    log_debug(f"[Attempt {attempt + 1}] Signing RPC-forged bytes ({label})...")
+                    result = sign_and_inject_from_rpc_forge(rpc, key, rpc_forged_hex)
+                    log_info(f"[Attempt {attempt + 1}] ✅ Inject successful ({label})!")
+                    return result if not isinstance(result, dict) else result.get("hash", str(result))
 
-                # Sign and inject using RPC forge
-                log_error(f"[Attempt {attempt + 1}] Signing RPC-forged bytes...")
-                result = sign_and_inject_from_rpc_forge(rpc, key, rpc_forged_hex)
-                log_error(f"[Attempt {attempt + 1}] ✅ Inject successful!")
+                log_debug(f"[Attempt {attempt + 1}] Building unstake op: {amount_xtz} XTZ")
 
-                if isinstance(result, dict):
-                    return result.get("hash", str(result))
+                unstake_op = {
+                    'kind': 'unstake',
+                    'source': source_address,
+                    'fee': str(DEFAULT_UNSTAKE_FEE),
+                    'counter': str(counter_to_use),
+                    'gas_limit': str(DEFAULT_UNSTAKE_GAS),
+                    'storage_limit': str(DEFAULT_UNSTAKE_STORAGE),
+                    'amount': str(amount_mutez),
+                }
+
+                legacy_op = {
+                    'kind': 'transaction',
+                    'source': source_address,
+                    'destination': source_address,
+                    'fee': str(DEFAULT_UNSTAKE_FEE),
+                    'counter': str(counter_to_use),
+                    'gas_limit': str(DEFAULT_UNSTAKE_GAS),
+                    'storage_limit': str(DEFAULT_UNSTAKE_STORAGE),
+                    'amount': str(amount_mutez),
+                    'parameters': {'entrypoint': 'unstake', 'value': {'prim': 'Unit'}},
+                }
+
+                try:
+                    result = _forge_and_inject(legacy_op, label="unstake-legacy")
+                except Exception as legacy_err:
+                    log_warning("Legacy unstake transaction failed, trying unstake op", exception=legacy_err)
+                    try:
+                        result = _forge_and_inject(unstake_op, label="unstake-op")
+                    except Exception as unstake_err:
+                        if _is_unsupported_manager_op(unstake_err):
+                            raise RuntimeError(
+                                "RPC/protocol does not support unstake operations on this network."
+                            ) from unstake_err
+                        raise
+
                 return str(result)
 
             except Exception as e:
@@ -1662,7 +2068,7 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
             raise
 
         # Reveal first
-        log_error("Wallet not revealed. Attempting reveal operation first...")
+        log_warning("Wallet not revealed. Attempting reveal operation first...")
 
         def _inject_reveal_with_retry(max_retries: int = 3):
             last_error = None
@@ -1670,7 +2076,7 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
                 try:
                     if attempt > 0:
                         settling_time = 3.0
-                        log_error(f"Waiting {settling_time}s before reveal retry {attempt + 1}")
+                        log_debug(f"Waiting {settling_time}s before reveal retry {attempt + 1}")
                         time.sleep(settling_time)
 
                     # Create fresh client with correct pattern
@@ -1706,11 +2112,10 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
                 f"Error: {rev_e}"
             ) from rev_e
 
-        log_error(f"Reveal successful ({reveal_oph}), waiting 8s for network propagation")
+        log_info(f"Reveal successful ({reveal_oph}), waiting 8s for network propagation")
         time.sleep(8)
 
         try:
             return _inject_with_retry()
         except Exception as unstake_e:
             raise RuntimeError(f"Unstake failed after reveal ({reveal_oph}): {unstake_e}") from unstake_e
-

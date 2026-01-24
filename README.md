@@ -1,69 +1,52 @@
-# 🥖 Sassy Wallet - The Tezos Wallet That Actually Teaches You
+# 🥖 Sassy Wallet
 
-**Not your average wallet. This one has attitude... and substance.**
+**A Tezos TUI wallet with opinions, jokes, and real controls.**
 
-## What is this?
+## What it is
 
-A Terminal UI (TUI) wallet for Tezos that **refuses to let you be lazy**. While other wallets hide complexity and make you click blindly, Sassy Wallet throws you into the bakery and makes you **understand what you're doing**.
+A terminal wallet that **doesn’t hide the knobs**. You learn Tezos by doing Tezos.
 
-## What it actually does (right now)
+## Features (current)
 
-This is an **MVP** (Minimum Viable Product, fancy words for "it works but it's not perfect"):
+- **Import wallets**: secret key, 12/24-word mnemonic, watch-only, backup file
+- **Bulk backup / restore** with passphrase encryption (AES-256-GCM + scrypt)
+- **Send XTZ** with fee/gas controls and sane warnings
+- **Receive** with quick copy and multi-wallet selector
+- **Delegate / Stake / Unstake** with dedicated flows (Stake HQ)
+- **Wallet status + history** with bakers, staking, and delegation info
+- **RPC + network switching** with friendly status feedback
+- **Sassy commentary** that keeps you humble ¬_¬
 
-- ✅ **Import wallets** (encrypted JSON, seed phrases, private keys)
-- ✅ **Send XTZ** with manual gas/fee control (learn or suffer ¬¬)
-- ✅ **Delegate to bakers** (because passive income is nice)
-- ✅ **View balances & transaction history** (the basics, duh)
-- ✅ **Sassy commentary** that roasts your financial decisions
-- ✅ **Advanced mode** with actual jokes (not boring tooltips)
-- ⚠️ **Stake HQ module is BROKEN** (working on it, see below)
-
-## What makes this different?
-
-Most wallets treat you like a baby. This one treats you like an adult who **should know better**.
-
-- **No hand-holding**: Want to send a transaction? Learn about gas limits, storage, and fees.
-- **Real feedback**: The wallet will literally tell you when you're being cheap with fees.
-- **Educational by force**: You'll understand Tezos operations whether you like it or not.
-- **Bakery-themed**: Because why not? Bakers = validators. Get it? 👨‍🍳
-
-## Installation
+## Install
 
 ```bash
 pip install -r requirements.txt
 python -m sassy_wallet
 ```
 
-## Current Status: MVP Beta
+## V2 ideas (wishlist)
 
-This is **version 0.1** - it works, it's functional, but it's not polished. If the community actually uses this and finds it valuable, there will be a **v2.0** with:
-- Fixed Stake HQ module
-- More features
-- Better error handling
-- Less sass (just kidding, more sass)
+- Hardware wallet support
+- Smarter tx indexing + cleaner history UX
+- Bulk operations (send/undelegate/stake)
+- Safer key handling UX + recovery helpers
+- UI themes + custom keybindings
 
-## Known Issues
+## Why this exists
 
-🚨 **STAKE HQ MODULE IS BROKEN** 🚨
+Most wallets treat you like a baby. This one treats you like a baker.
 
-The pseudo-operations for staking aren't working correctly. I'm trying to fix it ASAP, but here's the reality: I don't have unlimited time or resources. This is open-source, built with passion, but **passion doesn't pay the bills**.
+## Warning (read me, chef)
 
-**If you find this useful, donate:**
-- Tezos: tz1i36vhJwdv75p4zfRu3TPyqhaXyxDWGoz9
-- Or contribute to the code (PRs welcome!)
+This is in active development. You *will* find a few surprise croissants (bugs) on the way.  
+Use with caution and don’t import your main wallet with the grandpa portfolio in it.
 
-## Why does this exist?
+I’m building this because Tezos needs fun, educational TUI tools that **didn’t exist before**.
 
-Because the Tezos ecosystem needs tools that **teach users**, not just execute commands. Good practices matter. Understanding your transactions matters. This wallet forces you to care.
+If this helps, donations fuel more pizzas (features) and V2 work.  
+Tezos: `tz1LJmf4GUTrNsZVWXomSfqyWEWdNPo75Wz3`  
+A donation button is coming to the landing page.
 
 ## License
 
-MIT - Do whatever you want with it, just don't blame me if you send all your XTZ to the wrong address because you didn't read the warnings. ¬¬
-
-## Contributing
-
-PRs are welcome. Make sure your code is clean, well-commented, and doesn't break the sass. Tests are appreciated but not mandatory (it's an MVP, remember?).
-
----
-
-**Made with caffeine, frustration, and a desperate desire to make Tezos users actually understand what they're doing.** 👨‍🍳✨
+MIT. Don’t blame the oven if you burn the bread.

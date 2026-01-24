@@ -9,7 +9,7 @@ pytezos>=3.11.0
 
 # Cryptography
 cryptography>=41.0.0
-argon2-cffi>=23.1.0
 
 # Additional dependencies for pytezos
 base58>=2.1.1
+requests>=2.31.0
