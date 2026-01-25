@@ -449,7 +449,8 @@ def _contains_unrevealed_key(err: Any) -> bool:
     except Exception as e:
         log_error("Failed to convert error to string", exception=e)
         s = ""
-    if "unrevealed_key" in s:
+    s_low = s.lower()
+    if "unrevealed_key" in s_low or "unrevealed manager key" in s_low:
         return True
 
     try:
@@ -457,7 +458,8 @@ def _contains_unrevealed_key(err: Any) -> bool:
     except Exception as e:
         log_error("Failed to get repr of error", exception=e)
         r = ""
-    return "unrevealed_key" in r
+    r_low = r.lower()
+    return "unrevealed_key" in r_low or "unrevealed manager key" in r_low
 
 
 def is_wallet_revealed(rpc: str, address: str) -> bool:
@@ -794,6 +796,25 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
     return out
 
 
+def has_outgoing_tx(rpc: str, address: str) -> bool:
+    """Return True if the address has at least one outgoing transaction."""
+    base = _tzkt_base_from_rpc(rpc)
+    params = {
+        "sender": address,
+        "status": "applied",
+        "limit": "1",
+        "sort.desc": "level",
+    }
+    url = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "sassy-wallet/1.3.0"},
+        method="GET",
+    )
+    data = _urlopen_json_with_retries(req, timeout=10, retries=2)
+    return isinstance(data, list) and len(data) > 0
+
+
 def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, Any]]:
     """Resolve a transaction by hash from TzKT and format it for history."""
     if not oph:
@@ -863,6 +884,8 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
             data = _urlopen_json_with_retries(req, timeout=15, retries=2)
             if isinstance(data, list) and data:
                 it = data[0]
+            elif isinstance(data, dict):
+                it = data
         except Exception:
             return None
         if it is None:
@@ -871,13 +894,16 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
     sender = _extract_addr(it, "sender", "source")
     target = _extract_addr(it, "target", "destination")
     if sender != address and target != address:
-        return None
+        # Allow delegation-like ops where target isn't set but sender matches.
+        if sender != address:
+            return None
     amount_mutez = int(it.get("amount") or 0)
     params = it.get("parameter") or it.get("parameters") or {}
     entrypoint = params.get("entrypoint") if isinstance(params, dict) else None
     metadata = it.get("metadata") or {}
     op_res = metadata.get("operation_result") or {}
     updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
+    op_type = it.get("type") or it.get("kind") or ""
 
     if sender == address and target == address and entrypoint == "stake":
         direction = "STK"
@@ -893,6 +919,10 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
             baker_addr = get_delegation_info(rpc, address) or ""
         counterparty = _format_baker_label(baker_addr)
         baker_label = counterparty
+    elif op_type == "delegation" and sender == address:
+        direction = "DEL"
+        delegate = _extract_addr(it, "newDelegate", "delegate", "target", "destination")
+        counterparty = _format_baker_label(delegate) if delegate else "—"
     elif sender == address:
         direction = "OUT"
         counterparty = target or "?"
@@ -903,14 +933,15 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
         direction = "?"
         counterparty = "?"
 
+    item_kind = "delegation" if op_type == "delegation" else "transaction"
     item = {
         "ts": it.get("timestamp") or "",
         "direction": direction,
         "amount_xtz": mutez_to_xtz(amount_mutez),
         "counterparty": counterparty,
         "hash": it.get("hash") or "",
-        "kind": "transaction",
-        "entrypoint": entrypoint or "",
+        "kind": item_kind,
+        "entrypoint": (entrypoint or "delegation") if op_type == "delegation" else (entrypoint or ""),
         "status": (it.get("status") or "CONFIRMED").upper(),
     }
     if direction in ("STK", "UST"):
