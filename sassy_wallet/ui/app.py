@@ -50,7 +50,7 @@ from sassy_wallet.core.tezos import (
     unstake_xtz,
     is_revealed,
 )
-from sassy_wallet.core.logger import log_exception, safe_log_exception, log_error, log_info, log_warning
+from sassy_wallet.core.logger import log_exception, safe_log_exception, log_error, log_info, log_warning, log_debug
 from sassy_wallet.core.validation import (
     validate_baker_address,
     validate_tezos_address,
@@ -1008,8 +1008,8 @@ class PromptScreen(ModalScreen[str]):
             if key == "escape":
                 try:
                     self.query_one("#cancel", Button).focus()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to focus cancel button in passphrase screen", exception=str(e))
                 event.stop()
                 return
             # For all other keys, let Input handle them naturally (NO event.stop())
@@ -1318,8 +1318,8 @@ class BackupPassphraseScreen(ModalScreen[Optional[dict]]):
             if key == "escape":
                 try:
                     self.query_one("#cancel", Button).focus()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to focus cancel button in passphrase confirmation", exception=str(e))
                 event.stop()
                 return
             return
@@ -1742,8 +1742,8 @@ class ConfirmStakeScreen(ModalScreen[dict]):
                 fee_title.update(f"[b]Fee[/b] — {shimmer} [dim](↑/↓ to choose)[/dim]")
             else:
                 fee_title.update("[b]Fee[/b] (↑/↓ to choose)")
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to update fee title in stake confirm", exception=str(e))
 
         if estimating:
             texts = [
@@ -1815,8 +1815,8 @@ class ConfirmStakeScreen(ModalScreen[dict]):
         try:
             self.query_one("#stake", Button).disabled = False
             self.query_one("#stake", Button).focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to enable stake button in stake confirm", exception=str(e))
 
     def _apply_estimate_fallback(self) -> None:
         if not self._estimating or self._estimate is not None:
@@ -2092,8 +2092,8 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
                 fee_title.update(f"[b]Fee[/b] — {shimmer} [dim](↑/↓ to choose)[/dim]")
             else:
                 fee_title.update("[b]Fee[/b] (↑/↓ to choose)")
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to update fee title in unstake confirm", exception=str(e))
 
         if estimating:
             texts = [
@@ -2163,8 +2163,8 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
         try:
             self.query_one("#unstake", Button).disabled = False
             self.query_one("#unstake", Button).focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to enable unstake button in unstake confirm", exception=str(e))
 
     def _apply_estimate_fallback(self) -> None:
         if not self._estimating or self._estimate is not None:
@@ -2533,6 +2533,7 @@ class AddressDetailScreen(ModalScreen[None]):
     def copy_pressed(self) -> None:
         try:
             self.app.copy_to_clipboard(self.address)  # type: ignore[attr-defined]
+            self.app._status_lock_until_refresh = False  # type: ignore[attr-defined]
             self.app._set_status(f"✅ Address copied: {self.address}")  # type: ignore[attr-defined]
         except Exception as e:
             log_warning("Clipboard copy failed", exception=e, address=self.address)
@@ -3494,8 +3495,8 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
             if getattr(event, "key", None) == "escape":
                 try:
                     self.query_one("#cancel", Button).focus()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to focus cancel button in import secret screen", exception=str(e))
                 event.stop()
                 return
             return
@@ -3592,8 +3593,8 @@ class ImportWatchScreen(ModalScreen[Optional[dict]]):
             if getattr(event, "key", None) == "escape":
                 try:
                     self.query_one("#cancel", Button).focus()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to focus cancel button in import watch screen", exception=str(e))
                 event.stop()
                 return
             return
@@ -4416,8 +4417,8 @@ class ReceiveScreen(ModalScreen[None]):
             self.query_one("#address_text", Static).update(
                 f"[b]{self.address}[/b]\n[dim]👆 Share this address to receive XTZ[/dim]"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to update receive address text", exception=str(e), address=address)
 
     @on(ListView.Selected, "#wallet_selector")
     def wallet_selected(self, event: ListView.Selected) -> None:
@@ -4971,8 +4972,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             if key == "escape":
                 try:
                     self.query_one("#cancel", Button).focus()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to focus cancel button in stake screen", exception=str(e))
                 event.stop()
             # For all other keys, let Input handle them naturally (NO event.stop())
             return
@@ -4986,7 +4987,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         # Valid navigation from here
 
         if key == "escape":
-            self.dismiss(None)
+            self.cancel_pressed()
             return
         if key == "backspace" and self.selected_account:
             self._go_back_to_selector()
@@ -5466,8 +5467,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 if baker.get("address") == value:
                     baker_name = baker.get("name", "Unknown Baker")
                     break
-        except:
-            pass
+        except Exception as e:
+            log_debug("Failed to load known bakers list", exception=str(e))
 
         # Close StakeScreen and return data to app for passphrase + estimation handling
         self.dismiss(
@@ -5821,15 +5822,15 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     f"[dim]{error_msg}[/dim]\n"
                     f"[yellow]Check logs/wallet.log for details[/yellow]"
                 )
-            except:
-                pass
+            except Exception as e:
+                log_debug("Failed to update staking error message in modal", exception=str(e))
 
             # Also show error in main app
             try:
                 self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
                 self.app._set_status(f"[red]❌ Staking failed - check logs[/red]")  # type: ignore[attr-defined]
-            except:
-                pass
+            except Exception as e:
+                log_debug("Failed to update staking error status in app", exception=str(e))
 
     async def _perform_unstaking(self, amount: Decimal, fee_mutez: Optional[int] = None, gas_limit: Optional[int] = None, storage_limit: Optional[int] = None) -> None:
         """Unstake XTZ."""
@@ -6014,6 +6015,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         # Stop spinner if delegation was pending
         if self._delegation_pending:
             self.app._ui(self.app._stop_spinner)  # type: ignore[attr-defined]
+        self.app._set_status("👀 Chad mode canceled — dough back in the fridge.")  # type: ignore[attr-defined]
         self.dismiss(None)
 
     def on_unmount(self) -> None:
@@ -6438,8 +6440,8 @@ class ConfirmSendScreen(ModalScreen[dict]):
                 fee_title.update(f"[b]Fee[/b] — {shimmer} [dim](↑/↓ to choose)[/dim]")
             else:
                 fee_title.update("[b]Fee[/b] (↑/↓ to choose)")
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to update fee title in send confirm", exception=str(e))
 
         if estimating:
             texts = [
@@ -6517,8 +6519,8 @@ class ConfirmSendScreen(ModalScreen[dict]):
         try:
             self.query_one("#send", Button).disabled = False
             self.query_one("#send", Button).focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to enable send button in send confirm", exception=str(e))
 
     def _apply_estimate_fallback(self) -> None:
         if not self._estimating or self._estimate is not None:
@@ -6590,11 +6592,15 @@ class ConfirmSendScreen(ModalScreen[dict]):
                 # Focus appropriate button based on context
                 try:
                     self.query_one("#send", Button).focus()
-                except:
+                except Exception as e2:
                     try:
                         self.query_one("#delegate", Button).focus()
-                    except:
-                        pass
+                    except Exception as e3:
+                        log_debug(
+                            "Failed to focus fallback buttons in send confirm",
+                            exception=str(e3),
+                            prior_exception=str(e2),
+                        )
 
     def _parse_overrides(self) -> tuple[Optional[int], Optional[int], Optional[int]]:
         fee_xtz_s = sanitize_input(self.query_one("#fee_xtz", Input).value or "")
@@ -6677,8 +6683,8 @@ class ConfirmSendScreen(ModalScreen[dict]):
             if key == "escape" and isinstance(self.app.focused, Input):
                 try:
                     self.query_one("#cancel", Button).focus()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to focus cancel button in send confirm", exception=str(e))
                 event.stop()
             return
 
@@ -6972,8 +6978,8 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
                 fee_title.update(f"[b]Fee[/b] — {shimmer} [dim](↑/↓ to choose)[/dim]")
             else:
                 fee_title.update("[b]Fee[/b] (↑/↓ to choose)")
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to update fee title in delegate confirm", exception=str(e))
 
         if estimating:
             texts = [
@@ -7109,11 +7115,15 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
                 # Focus appropriate button based on context
                 try:
                     self.query_one("#send", Button).focus()
-                except:
+                except Exception as e2:
                     try:
                         self.query_one("#delegate", Button).focus()
-                    except:
-                        pass
+                    except Exception as e3:
+                        log_debug(
+                            "Failed to focus fallback buttons in delegate confirm",
+                            exception=str(e3),
+                            prior_exception=str(e2),
+                        )
 
     def _parse_overrides(self) -> tuple[Optional[int], Optional[int], Optional[int]]:
         fee_xtz_s = sanitize_input(self.query_one("#fee_xtz", Input).value or "")
@@ -7196,8 +7206,8 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
             if key == "escape" and isinstance(self.app.focused, Input):
                 try:
                     self.query_one("#cancel", Button).focus()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to focus cancel button in delegate confirm", exception=str(e))
                 event.stop()
             return
 
@@ -7757,8 +7767,8 @@ class SendScreen(ModalScreen[Optional[dict]]):
             if key == "escape":
                 try:
                     self.query_one("#cancel", Button).focus()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to focus cancel button in send screen", exception=str(e))
                 event.stop()
                 return
             return
@@ -7974,8 +7984,8 @@ class DestinationPickerScreen(ModalScreen[str]):
             if key == "escape":
                 try:
                     self.query_one("#cancel", Button).focus()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to focus cancel button in destination picker", exception=str(e))
                 event.stop()
                 return
 
@@ -8790,8 +8800,8 @@ class WalletApp(App):
     def on_resize(self, event) -> None:
         try:
             self._maybe_warn_terminal_size(event.size)
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to handle resize event", exception=str(e))
 
     def copy_to_clipboard(self, text: str) -> None:
         """Copy text to the OS clipboard with CLI fallbacks for TUI environments."""
@@ -8889,15 +8899,15 @@ class WalletApp(App):
         if key == "down" and self.focused is None:
             try:
                 self.query_one("#add", Button).focus()
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug("Failed to focus add button from keyboard", exception=str(e))
             event.stop()
             return
         if key == "up" and self.focused is None:
             try:
                 self.query_one("#send", Button).focus()
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug("Failed to focus send button from keyboard", exception=str(e))
             event.stop()
             return
         if key == "enter" and isinstance(self.focused, ListView):
@@ -8972,8 +8982,8 @@ class WalletApp(App):
             if self.focused is not None:
                 try:
                     self.set_focus(None)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to clear focus on escape", exception=str(e))
                 event.stop()
                 return
             self.action_quit()
@@ -9442,8 +9452,7 @@ class WalletApp(App):
             log_warning("Failed to apply send failsafe cleanup", exception=e, address=address)
 
     def _start_copy_blink(self, address: str) -> None:
-        if self._status_lock_until_refresh:
-            return
+        self._status_lock_until_refresh = False
         if self._copy_blink_timer:
             self._copy_blink_timer.stop()
         self._copy_blink_active = True
@@ -9455,8 +9464,7 @@ class WalletApp(App):
         if not self._copy_blink_active:
             return
         if self._status_lock_until_refresh:
-            self._copy_blink_active = False
-            return
+            self._status_lock_until_refresh = False
         blink_on = (self._copy_blink_i % 2) == 0
         icon = "⧉" if blink_on else "[dim]⧉[/dim]"
         self._set_status(f"✅ Address copied {icon}")
@@ -9485,8 +9493,8 @@ class WalletApp(App):
         if hasattr(self, "_breathing_timer") and self._breathing_timer:
             try:
                 self._breathing_timer.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug("Failed to stop breathing timer", exception=str(e))
         self._breathing_active = True
         self._breathing_bright = True
         self._breathing_bright_class = bright_class
@@ -9618,8 +9626,8 @@ class WalletApp(App):
                     bottom_bar.remove_class(dim_class)
                     status_widget.add_class(bright_class)
                     bottom_bar.add_class(bright_class)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to apply breathing classes for pending shimmer", exception=str(e))
                 self._breathing_timer = self.set_timer(
                     Config.STATUS_BLINK_INTERVAL_SECONDS,
                     self._toggle_breathing,
@@ -9628,8 +9636,8 @@ class WalletApp(App):
             if self._pending_shimmer_timer:
                 try:
                     self._pending_shimmer_timer.stop()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_debug("Failed to stop pending shimmer timer", exception=str(e))
                 self._pending_shimmer_timer = None
             self._pending_shimmer_i = 0
 
@@ -9883,8 +9891,8 @@ class WalletApp(App):
         if w is not None and getattr(w, "id", None) == "tx_detail_content":
             try:
                 self.query_one("#add", Button).focus()
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug("Failed to focus add button from tx details", exception=str(e))
             return
         if isinstance(w, ListView):
             n = len(w.children)
@@ -9970,20 +9978,20 @@ class WalletApp(App):
     def _focus_wallet_buttons(self) -> None:
         try:
             self.query_one("#send", Button).focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to focus wallet buttons", exception=str(e))
 
     def _focus_action_buttons(self) -> None:
         try:
             self.query_one("#send", Button).focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to focus action buttons", exception=str(e))
 
     def _focus_accounts_header(self) -> None:
         try:
             self.query_one("#add", Button).focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to focus accounts header", exception=str(e))
 
     def _focus_accounts_list(self) -> None:
         try:
@@ -9991,8 +9999,8 @@ class WalletApp(App):
             if lv.index is None:
                 lv.index = 0
             lv.focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to focus accounts list", exception=str(e))
 
     def _focus_history_list(self) -> None:
         try:
@@ -10000,14 +10008,14 @@ class WalletApp(App):
             if lv.index is None:
                 lv.index = 0
             lv.focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to focus history list", exception=str(e))
 
     def _focus_tx_details(self) -> None:
         try:
             self.query_one("#tx_detail_content", Static).focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to focus tx details", exception=str(e))
 
     # -------------------------
     # Accounts
@@ -10131,11 +10139,17 @@ class WalletApp(App):
                 addr_label = item.query_one(".account_address", Label)
                 name_label.update(f"{idx + 1:<2} {name_with_tag}")
                 addr_label.update(f"{addr_full}{suffix}")
-            except Exception:
+            except Exception as e:
+                log_debug(
+                    "Failed to update account row labels",
+                    exception=str(e),
+                    index=idx,
+                    address=addr_full,
+                )
                 label.update(f"{idx + 1:<2} {name_with_tag} │ {addr_full}{suffix}")
             marker_label.update(marker)
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("Failed to render account row", exception=str(e), index=idx)
 
     def _show_account_loading(self, idx: int) -> None:
         try:
@@ -10669,8 +10683,8 @@ class WalletApp(App):
                             pending_changed = True
                             resolved_items.append(resolved)
                             continue
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log_debug("Failed to resolve pending tx by hash", exception=str(e), oph=oph, address=address)
                 merged.append(dict(pending))
 
         merged.extend(resolved_items)
@@ -10691,20 +10705,20 @@ class WalletApp(App):
         if isinstance(amt, str):
             try:
                 coerced["amount_xtz"] = Decimal(amt)
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug("Failed to coerce pending amount", exception=str(e), amount=amt)
         proc = coerced.get("processing_until")
         if isinstance(proc, str):
             try:
                 coerced["processing_until"] = float(proc)
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug("Failed to coerce pending processing_until", exception=str(e), processing_until=proc)
         force_until = coerced.get("force_pending_until")
         if isinstance(force_until, str):
             try:
                 coerced["force_pending_until"] = float(force_until)
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug("Failed to coerce pending force_until", exception=str(e), force_until=force_until)
         return coerced
 
     def _persist_pending_ops(self) -> None:
@@ -10975,6 +10989,7 @@ class WalletApp(App):
 
     def action_toggle_auto_refresh(self) -> None:
         """Toggle automatic refresh on/off."""
+        self._status_lock_until_refresh = False
         self._auto_refresh_enabled = not self._auto_refresh_enabled
         self.store["auto_refresh_enabled"] = self._auto_refresh_enabled
         save_store(self.store)
@@ -11021,6 +11036,7 @@ class WalletApp(App):
         self._load_history_for_selected(force=True)
 
     def action_more_history(self) -> None:
+        self._status_lock_until_refresh = False
         if not self.selected:
             self._set_status("ℹ️ No account selected")
             return
@@ -11051,6 +11067,7 @@ class WalletApp(App):
         self._load_history_for_selected(force=True)
 
     def action_tx_details(self) -> None:
+        self._status_lock_until_refresh = False
         focused = self.focused
         if not isinstance(focused, ListView) or focused.id != "history":
             return
@@ -11069,6 +11086,7 @@ class WalletApp(App):
 
     @work(exclusive=True)
     async def action_network(self) -> None:
+        self._status_lock_until_refresh = False
         current = network_from_rpc(self.rpc)
         choice = await self.push_screen_wait(NetworkPickerScreen(current=current))
         if not choice or choice == current:
@@ -11127,6 +11145,7 @@ class WalletApp(App):
 
     @work(exclusive=True)
     async def action_rpc(self) -> None:
+        self._status_lock_until_refresh = False
         old_rpc = self.rpc
         choice = await self.push_screen_wait(RpcPickerScreen(current_rpc=self.rpc))
         if not choice or choice == old_rpc:
@@ -11169,6 +11188,7 @@ class WalletApp(App):
             self._load_history_for_selected(force=True, quiet=True)
 
     def action_receive(self) -> None:
+        self._status_lock_until_refresh = False
         if not self.accounts:
             self._set_status("🥐 Receive what, exactly? Fancy some croissant? Import a wallet first. ¬_¬")
             return
@@ -11177,6 +11197,7 @@ class WalletApp(App):
 
     @work(exclusive=True)
     async def action_quit(self) -> None:
+        self._status_lock_until_refresh = False
         import random
 
         exit_lines = [
@@ -11209,6 +11230,7 @@ class WalletApp(App):
     @work(exclusive=True)
     async def action_stake(self) -> None:
         """Open stake/delegation modal and handle the returned action."""
+        self._status_lock_until_refresh = False
         await self._open_stake_flow()
 
     async def _open_stake_flow(self, ctx: Optional[dict] = None) -> None:
@@ -11807,6 +11829,7 @@ class WalletApp(App):
 
     def action_show_address(self) -> None:
         """Show full address details in a modal."""
+        self._status_lock_until_refresh = False
         if not self.selected:
             self._set_status("ℹ️ No account selected")
             return
@@ -11815,6 +11838,7 @@ class WalletApp(App):
     @work(exclusive=True)
     async def action_backup(self) -> None:
         """Create a timestamped encrypted backup (single wallet or all)."""
+        self._status_lock_until_refresh = False
         if not self.accounts:
             self._ui(self._set_status, "🥐 Back up the void? Import a wallet first. ¬_¬")
             return
@@ -11948,6 +11972,7 @@ class WalletApp(App):
     @work(exclusive=True)
     async def action_delete_wallet(self) -> None:
         """Delete a wallet after selection and confirmation."""
+        self._status_lock_until_refresh = False
         if not self.accounts:
             self._set_status("🥐 Can't delete nothing. Import a wallet first. ¬_¬")
             return
@@ -12014,6 +12039,7 @@ class WalletApp(App):
 
     @work(exclusive=True)
     async def action_import_wallet(self) -> None:
+        self._status_lock_until_refresh = False
         self._set_busy(True)
         try:
             selection = await self.push_screen_wait(ImportWizardScreen())
@@ -12475,6 +12501,7 @@ class WalletApp(App):
     @work(exclusive=True)
     async def action_send(self) -> None:
         """Simplified send flow using unified SendScreen with back navigation."""
+        self._status_lock_until_refresh = False
         if self._send_in_progress:
             self._set_status("⏳ Send operation already in progress…")
             return
@@ -12580,8 +12607,12 @@ class WalletApp(App):
                         staked_mutez = get_staking_balance(rpc_to_use, from_addr)
                         if staked_mutez > 0:
                             msg = "❌ Saldo disponible insuficiente (tienes fondos en staking)."
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log_debug(
+                            "Failed to read staked balance during pre-send check",
+                            exception=str(e),
+                            address=from_addr,
+                        )
                     self._ui(self._set_status, msg, force=True)
                     return
             except Exception as e:
