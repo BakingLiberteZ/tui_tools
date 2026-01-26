@@ -12,6 +12,8 @@ import time
 import json
 import webbrowser
 import logging
+import subprocess
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -46,6 +48,7 @@ from sassy_wallet.core.tezos import (
     delegate_to_baker,
     stake_xtz,
     unstake_xtz,
+    is_revealed,
 )
 from sassy_wallet.core.logger import log_exception, safe_log_exception, log_error, log_info, log_warning
 from sassy_wallet.core.validation import (
@@ -151,7 +154,7 @@ def filter_mnemonic_input(value: str) -> str:
         return ""
     raw = str(value).lower()
     filtered = "".join(ch for ch in raw if ch.isalpha() or ch.isspace())
-    return " ".join(filtered.split())
+    return filtered
 
 
 def filter_derivation_path(value: str) -> str:
@@ -168,7 +171,7 @@ class Config:
     """Application configuration constants."""
     # RPC URLs
     RPC_DEFAULT_MAINNET = "https://rpc.tzkt.io/mainnet"
-    RPC_DEFAULT_GHOSTNET = "https://ghostnet.tezos.marigold.dev"
+    RPC_DEFAULT_GHOSTNET = "https://rpc.tzkt.io/ghostnet"
 
     RPC_MAINNET_CANDIDATES = [
         "https://rpc.tzkt.io/mainnet",
@@ -224,6 +227,7 @@ class Config:
     STATUS_BLINK_INTERVAL_SECONDS = 0.4
     PRICE_REFRESH_SECONDS = 60.0
     PRICE_INITIAL_DELAY_SECONDS = 5.0
+    SEND_FAILSAFE_SECONDS = 30.0
 
     # Baker search
     BAKER_SEARCH_MAX_DEPTH = 20
@@ -712,12 +716,12 @@ class ConfirmScreen(ModalScreen[bool]):
     }
 
     ConfirmScreen > Vertical {
-        width: 52;
-        min-width: 52;
-        max-width: 52;
+        width: 66;
+        min-width: 66;
+        max-width: 66;
         height: auto;
-        min-height: 7;
-        max-height: 16;
+        min-height: 10;
+        max-height: 24;
         overflow-y: hidden;
         background: $surface;
         border: heavy #ef4444;
@@ -812,6 +816,58 @@ class ConfirmScreen(ModalScreen[bool]):
                 self.dismiss(True)
             event.stop()
 
+
+class ExitConfirmScreen(ConfirmScreen):
+    """Dedicated exit confirmation dialog."""
+
+    CSS = """
+    ExitConfirmScreen {
+        align: center middle;
+    }
+
+    ExitConfirmScreen > Vertical {
+        width: 56;
+        min-width: 56;
+        max-width: 56;
+        height: auto;
+        min-height: 8;
+        max-height: 18;
+        overflow-y: hidden;
+        background: $surface;
+        border: heavy #ef4444;
+        padding: 1 2;
+    }
+
+    ExitConfirmScreen #confirm_message {
+        max-height: 10;
+        overflow-y: auto;
+    }
+
+    ExitConfirmScreen Static {
+        margin-bottom: 0;
+    }
+
+    ExitConfirmScreen Horizontal {
+        align: center bottom;
+        margin-top: 1;
+    }
+
+    ExitConfirmScreen Horizontal > Button {
+        margin: 0 1;
+    }
+
+    ExitConfirmScreen Button {
+        border: none;
+        background: #1f2937;
+        color: #e5e7eb;
+    }
+
+    ExitConfirmScreen Button:focus {
+        background: #3b82f6;
+        color: #f8fafc;
+        text-style: bold;
+    }
+    """
 
 class PromptScreen(ModalScreen[str]):
     CSS = """
@@ -1139,12 +1195,12 @@ class BackupConfirmPassphraseScreen(PromptScreen):
     """Prompt screen for confirming backup passphrase (yellow confirm button)."""
     CSS = """
     BackupConfirmPassphraseScreen #ok {
-        background: #eab308;
+        background: #f97316;
         color: white;
     }
 
     BackupConfirmPassphraseScreen #ok:hover {
-        background: #ca8a04;
+        background: #ea580c;
         color: white;
     }
     """
@@ -1205,12 +1261,12 @@ class BackupPassphraseScreen(ModalScreen[Optional[dict]]):
     }
 
     BackupPassphraseScreen #ok {
-        background: #eab308;
+        background: #f97316;
         color: white;
     }
 
     BackupPassphraseScreen #ok:hover {
-        background: #ca8a04;
+        background: #ea580c;
         color: white;
     }
     """
@@ -2238,7 +2294,7 @@ class NetworkPickerScreen(ModalScreen[str]):
 
         options = [
             ("mainnet", "Mainnet — https://rpc.tzkt.io/mainnet"),
-            ("ghostnet", "Ghostnet — https://ghostnet.tezos.marigold.dev"),
+            ("ghostnet", "Ghostnet — https://rpc.tzkt.io/ghostnet"),
         ]
 
         for key, desc in options:
@@ -2645,6 +2701,11 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
             yield Input(placeholder="Wallet name (e.g., Savings)", id="inp_name")
             yield Input(placeholder="Secret key (edsk...)", id="inp_secret", password=True)
             yield Input(
+                placeholder="Passphrase for encrypted secret (edsk)",
+                id="inp_secret_pass",
+                password=True,
+            )
+            yield Input(
                 placeholder="12-word mnemonic (space separated)",
                 id="inp_mnemonic",
             )
@@ -2719,6 +2780,15 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
         if filtered != event.value:
             inp.value = filtered
 
+    @on(Input.Changed, "#inp_secret_pass")
+    def secret_pass_changed(self, event: Input.Changed) -> None:
+        secret = self.query_one("#inp_secret", Input).value.strip()
+        if not secret.startswith("edsk"):
+            return
+        enc_pass = self.query_one("#inp_passphrase", Input)
+        if not enc_pass.value.strip():
+            enc_pass.value = event.value
+
     @on(Input.Changed, "#inp_watch_addr")
     def watch_addr_changed(self, event: Input.Changed) -> None:
         inp = self.query_one("#inp_watch_addr", Input)
@@ -2761,6 +2831,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
 
         inp_name = self.query_one("#inp_name", Input)
         inp_secret = self.query_one("#inp_secret", Input)
+        inp_secret_pass = self.query_one("#inp_secret_pass", Input)
         inp_passphrase = self.query_one("#inp_passphrase", Input)
         secret_hint = self.query_one("#secret_hint", Static)
         inp_mnemonic = self.query_one("#inp_mnemonic", Input)
@@ -2791,6 +2862,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
             lv,
             inp_name,
             inp_secret,
+            inp_secret_pass,
             inp_passphrase,
             secret_hint,
             inp_mnemonic,
@@ -2822,6 +2894,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
             hint.update("We'll derive your address and encrypt your key.")
             self._set_hidden(inp_name, False)
             self._set_hidden(inp_secret, False)
+            self._set_hidden(inp_secret_pass, False)
             self._set_hidden(inp_passphrase, False)
             self._set_hidden(secret_hint, False)
             self._set_hidden(back_btn, False)
@@ -3020,11 +3093,23 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
         if self._step == "secret":
             name = self.query_one("#inp_name", Input).value.strip()
             secret = self.query_one("#inp_secret", Input).value.strip()
+            secret_passphrase = self.query_one("#inp_secret_pass", Input).value.strip()
             passphrase = self.query_one("#inp_passphrase", Input).value.strip()
             if not name or not secret or not passphrase:
                 self._set_error("⚠️ Fill all fields to continue.")
                 return
-            self.dismiss({"mode": "secret", "name": name, "secret": secret, "passphrase": passphrase})
+            if secret.startswith("edsk") and not secret_passphrase:
+                self._set_error("⚠️ Passphrase required for encrypted secret key.")
+                return
+            self.dismiss(
+                {
+                    "mode": "secret",
+                    "name": name,
+                    "secret": secret,
+                    "secret_passphrase": secret_passphrase,
+                    "passphrase": passphrase,
+                }
+            )
             return
         if self._step == "watch":
             name = self.query_one("#inp_watch_name", Input).value.strip()
@@ -3181,10 +3266,10 @@ class ImportTypeSelectorScreen(ModalScreen[Optional[str]]):
 
     ImportTypeSelectorScreen > Vertical {
         width: auto;
-        min-width: 65;
-        max-width: 80;
+        min-width: 58;
+        max-width: 72;
         height: auto;
-        max-height: 30;
+        max-height: 22;
         background: $surface;
         border: solid $primary;
         padding: 1 2;
@@ -3206,7 +3291,7 @@ class ImportTypeSelectorScreen(ModalScreen[Optional[str]]):
 
     ImportTypeSelectorScreen #import_types {
         margin-bottom: 1;
-        max-height: 12;
+        height: auto;
     }
 
     ImportTypeSelectorScreen #import_types > ListItem {
@@ -3313,6 +3398,7 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
 
     ImportSecretScreen #inp_name,
     ImportSecretScreen #inp_secret,
+    ImportSecretScreen #inp_secret_pass,
     ImportSecretScreen #inp_passphrase {
         margin-top: 1;
         background: transparent;
@@ -3326,6 +3412,7 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
 
     ImportSecretScreen #inp_name:focus,
     ImportSecretScreen #inp_secret:focus,
+    ImportSecretScreen #inp_secret_pass:focus,
     ImportSecretScreen #inp_passphrase:focus {
         border: solid #10b981;
     }
@@ -3359,6 +3446,7 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
             yield Static("[b]🔑 Import with Secret Key[/b]\nEnter all fields to add your wallet.", id="title", markup=True)
             yield Input(placeholder="Wallet name (e.g., Savings)", id="inp_name")
             yield Input(placeholder="Secret key (edsk...)", id="inp_secret", password=True)
+            yield Input(placeholder="Passphrase for encrypted secret (edsk)", id="inp_secret_pass", password=True)
             yield Input(placeholder="Passphrase to encrypt", id="inp_passphrase", password=True)
             yield Static(
                 "[yellow]Passphrase encrypts keys (AES-256-GCM + scrypt).[/yellow]",
@@ -3379,16 +3467,27 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
         if event.button.id == "ok":
             name = self.query_one("#inp_name", Input).value
             secret = self.query_one("#inp_secret", Input).value
+            secret_passphrase = self.query_one("#inp_secret_pass", Input).value
             passphrase = self.query_one("#inp_passphrase", Input).value
             self.dismiss({
                 "name": name,
                 "secret": secret,
+                "secret_passphrase": secret_passphrase,
                 "passphrase": passphrase,
             })
         elif event.button.id == "back":
             self.dismiss({"__BACK__": True})
         else:
             self.dismiss(None)
+
+    @on(Input.Changed, "#inp_secret_pass")
+    def secret_pass_changed(self, event: Input.Changed) -> None:
+        secret = self.query_one("#inp_secret", Input).value.strip()
+        if not secret.startswith("edsk"):
+            return
+        enc_pass = self.query_one("#inp_passphrase", Input)
+        if not enc_pass.value.strip():
+            enc_pass.value = event.value
 
     def on_key(self, event) -> None:
         if isinstance(self.app.focused, Input):
@@ -3618,7 +3717,7 @@ class BackupWalletSelectorScreen(WalletSelectorScreen):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #eab308;
+        border: heavy #f97316;
         padding: 1 2;
     }
 
@@ -3646,12 +3745,12 @@ class BackupWalletSelectorScreen(WalletSelectorScreen):
     }
 
     BackupWalletSelectorScreen #select {
-        background: #eab308;
+        background: #f97316;
         color: white;
     }
 
     BackupWalletSelectorScreen #select:hover {
-        background: #ca8a04;
+        background: #ea580c;
         color: white;
     }
 
@@ -3731,12 +3830,12 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
     }
 
     BackupMultiSelectorScreen #backup_selected {
-        background: #eab308;
+        background: #f97316;
         color: white;
     }
 
     BackupMultiSelectorScreen #backup_selected:hover {
-        background: #ca8a04;
+        background: #ea580c;
         color: white;
     }
 
@@ -4360,7 +4459,7 @@ class DeleteMultiSelectorScreen(ModalScreen[Optional[list["Account"]]]):
         min-width: 65;
         max-width: 80;
         height: auto;
-        max-height: 36;
+        max-height: 42;
         background: $surface;
         border: heavy #ef4444;
         padding: 1 2;
@@ -4683,6 +4782,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         # Cache wallet info to avoid re-fetching when selecting
         self._wallet_info_cache: dict[str, dict] = wallet_info_cache if wallet_info_cache is not None else {}
         self._initial_ctx = initial_ctx or {}
+        self._wallet_selector_target_index: int = 0
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -4754,6 +4854,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             # Refresh data asynchronously without blocking UI
             self.run_worker(self._load_wallet_statuses, exclusive=False, thread=True)
 
+        self._wallet_selector_target_index = 0
+        self.set_timer(0.01, self._apply_wallet_selector_index)
         self.call_later(self._apply_initial_ctx)
 
     def _apply_initial_ctx(self) -> None:
@@ -4777,12 +4879,24 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         try:
             lv = self.query_one("#wallet_selector", ListView)
             lv.index = idx
+            self._wallet_selector_target_index = idx
+            self.set_timer(0.01, self._apply_wallet_selector_index)
             self._select_wallet(idx)
             if amount is not None:
                 input_field = self.query_one("#input_field", Input)
                 input_field.value = str(amount)
         except Exception as e:
             log_error("Failed to restore stake context", exception=e)
+
+    def _apply_wallet_selector_index(self) -> None:
+        try:
+            lv = self.query_one("#wallet_selector", ListView)
+            if not lv.children:
+                return
+            idx = max(0, min(self._wallet_selector_target_index, len(lv.children) - 1))
+            lv.index = idx
+        except Exception as e:
+            log_error("Failed to reset wallet selector index", exception=e)
 
     def _load_wallet_statuses(self) -> None:
         """Load wallet statuses without blocking UI (threaded)."""
@@ -4979,6 +5093,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             self.query_one("#fun_note", Static).display = True
         except Exception as e:
             log_error("Failed to show wallet selector", exception=e)
+        self._wallet_selector_target_index = 0
+        self.set_timer(0.01, self._apply_wallet_selector_index)
 
         # Show Select button
         try:
@@ -5273,6 +5389,9 @@ class StakeScreen(ModalScreen[Optional[dict]]):
     @on(Button.Pressed, "#delegate_btn")
     async def delegate_pressed(self) -> None:
         """Handle delegation action."""
+        if not self.selected_account:
+            self._show_error("⚠️ Select a wallet first.")
+            return
         try:
             from sassy_wallet.core.tezos import has_outgoing_tx
             has_outgoing = has_outgoing_tx(self.rpc, self.selected_account.address)
@@ -5350,19 +5469,16 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         except:
             pass
 
-
         # Close StakeScreen and return data to app for passphrase + estimation handling
-            self.app.call_from_thread(
-                self.dismiss,
-                {
-                    "action": "delegate",
-                    "baker_address": value,
-                    "baker_name": baker_name,
-                    "account": self.selected_account,
-                },
-            )
+        self.dismiss(
+            {
+                "action": "delegate",
+                "baker_address": value,
+                "baker_name": baker_name,
+                "account": self.selected_account,
+            }
+        )
             
-    @work(exclusive=True)
     @on(Button.Pressed, "#stake_btn")
     async def stake_pressed(self) -> None:
         """Handle staking action."""
@@ -8092,6 +8208,62 @@ class WalletApp(App):
         height: 1;
     }
 
+    #accounts > ListItem > Horizontal {
+        width: 100%;
+        height: 1;
+    }
+
+    #accounts > ListItem > Horizontal > Label.account_name {
+        width: 26;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        content-align: left middle;
+    }
+
+    #accounts > ListItem > Horizontal > Label.account_sep {
+        width: 1;
+        content-align: center middle;
+    }
+
+    #accounts > ListItem > Horizontal > Label.account_address {
+        width: auto;
+        min-width: 0;
+        content-align: left middle;
+    }
+
+    #accounts > ListItem > Horizontal > Label.account_marker {
+        width: 2;
+        content-align: center middle;
+    }
+
+    #accounts > ListItem > Horizontal > Button.copy_addr {
+        width: 3;
+        min-width: 3;
+        max-width: 3;
+        height: 1;
+        min-height: 1;
+        max-height: 1;
+        padding: 0;
+        margin-left: 1;
+        border: none;
+        outline: none;
+        background: transparent;
+        color: #cbd5f5;
+        content-align: center middle;
+        text-style: dim;
+    }
+
+    #accounts > ListItem > Horizontal > Button.copy_addr:hover {
+        background: transparent;
+        color: #f8fafc;
+    }
+
+    #accounts > ListItem > Horizontal > Button.copy_addr:focus {
+        background: transparent;
+        color: #ffffff;
+    }
+
     #wallet_details {
         height: auto;
         padding: 0 1 0 2;
@@ -8518,6 +8690,12 @@ class WalletApp(App):
         self._size_warned: bool = False
 
         self._send_in_progress: bool = False
+        self._send_in_progress_token: float | None = None
+
+        self._copy_blink_timer = None
+        self._copy_blink_active = False
+        self._copy_blink_i = 0
+        self._copy_blink_addr = ""
 
         # Migrate from old global recent_to to per-wallet recent_to_by_wallet
         if "recent_to_by_wallet" not in self.store:
@@ -8546,9 +8724,9 @@ class WalletApp(App):
                     yield Button("Delete (Del)", id="delete")
                     yield Button("Exit", id="exit")
                     yield Static("💅 A wallet with an attitude", id="tagline")
-                # Column headers for wallet list (aligned with content format: name:<30 + " │ " + address)
-                # "Wallet" (6 chars) + 25 spaces to move │ right, aligning with content format
-                yield Static("[b]#  Wallet                       │ Address[/b]", id="accounts_columns_header", markup=True)
+                # Column headers for wallet list (aligned with fixed column widths)
+                header = f"{'#':<2} {'Wallet':<23}│ Address"
+                yield Static(f"[b]{header}[/b]", id="accounts_columns_header", markup=True)
                 yield ListView(id="accounts")
 
                 # Selected wallet details
@@ -8615,6 +8793,32 @@ class WalletApp(App):
         except Exception:
             pass
 
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copy text to the OS clipboard with CLI fallbacks for TUI environments."""
+        last_error: Exception | None = None
+        for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
+            if shutil.which(cmd[0]) is None:
+                continue
+            try:
+                subprocess.run(cmd, input=text, text=True, check=True)
+                return
+            except Exception as e:
+                last_error = e
+        try:
+            import pyperclip  # type: ignore
+
+            pyperclip.copy(text)
+            return
+        except Exception as e:
+            last_error = e
+        try:
+            super().copy_to_clipboard(text)
+            return
+        except Exception as e:
+            last_error = e
+        if last_error:
+            raise last_error
+
     def _maybe_warn_terminal_size(self, size) -> None:
         if self._size_warned or self._status_lock_until_refresh:
             return
@@ -8643,6 +8847,9 @@ class WalletApp(App):
         if self._price_initial_timer:
             self._price_initial_timer.stop()
             self._price_initial_timer = None
+        if self._copy_blink_timer:
+            self._copy_blink_timer.stop()
+            self._copy_blink_timer = None
 
         log_info("WalletApp unmounted, timers cleaned up")
 
@@ -8714,6 +8921,20 @@ class WalletApp(App):
                     self.action_more_history()
                     event.stop()
                     return
+        if key == "c" and isinstance(self.focused, ListView):
+            lv = self.focused
+            if getattr(lv, "id", None) == "accounts":
+                idx = lv.index
+                if idx is not None and 0 <= idx < len(self.accounts):
+                    addr = self.accounts[idx].address
+                    try:
+                        self.copy_to_clipboard(addr)
+                        self._start_copy_blink(addr)
+                    except Exception as e:
+                        log_warning("Clipboard copy failed", exception=e, address=addr)
+                        self._set_status(f"❌ Copy failed. Address: {addr}")
+                    event.stop()
+                    return
         if key in ("up", "down") and isinstance(self.focused, ListView):
             lv = self.focused
             idx = lv.index
@@ -8778,6 +8999,49 @@ class WalletApp(App):
     @on(MouseUp, "#rpc_indicator")
     def _stop_bottom_bar_mouse_up(self, event: MouseUp) -> None:
         """Ignore mouse-up events on the bottom bar area."""
+        event.stop()
+
+    @on(MouseDown, "#accounts ListItem")
+    def _accounts_item_mouse_down(self, event: MouseDown) -> None:
+        item = event.widget
+        width = getattr(item.size, "width", 0) or 0
+        if event.button != 1 or event.x < max(0, width - 3):
+            return
+        lv = self.query_one("#accounts", ListView)
+        items = list(lv.children)
+        try:
+            idx = items.index(item)
+        except ValueError:
+            return
+        if not (0 <= idx < len(self.accounts)):
+            return
+        addr = self.accounts[idx].address
+        try:
+            self.copy_to_clipboard(addr)
+            self._start_copy_blink(addr)
+        except Exception as e:
+            log_warning("Clipboard copy failed", exception=e, address=addr)
+            self._set_status(f"❌ Copy failed. Address: {addr}")
+        event.stop()
+
+    @on(Button.Pressed, ".copy_addr")
+    def _copy_addr_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id or ""
+        if not btn_id.startswith("copy_addr_"):
+            return
+        try:
+            idx = int(btn_id.rsplit("_", 1)[1])
+        except ValueError:
+            return
+        if not (0 <= idx < len(self.accounts)):
+            return
+        addr = self.accounts[idx].address
+        try:
+            self.copy_to_clipboard(addr)
+            self._start_copy_blink(addr)
+        except Exception as e:
+            log_warning("Clipboard copy failed", exception=e, address=addr)
+            self._set_status(f"❌ Copy failed. Address: {addr}")
         event.stop()
 
     # -------------------------
@@ -9161,6 +9425,50 @@ class WalletApp(App):
         """Set a styled status that stays until refresh."""
         self._status_lock_until_refresh = True
         self._set_status_styled(text, style=style, duration=0.0, force=True)
+
+    def _send_failsafe(self, token: float, address: str) -> None:
+        if not self._send_in_progress or self._send_in_progress_token != token:
+            return
+        log_warning("Send failsafe triggered; releasing send lock", address=address)
+        self._send_in_progress = False
+        self._send_in_progress_token = None
+        try:
+            self._stop_breathing_effect()
+            self._clear_account_loading(address)
+            self._refresh_account_row(address)
+            self._set_busy(False)
+            self._set_status("⚠️ Send stalled — oven cooling. Try again in 30s.", force=True)
+        except Exception as e:
+            log_warning("Failed to apply send failsafe cleanup", exception=e, address=address)
+
+    def _start_copy_blink(self, address: str) -> None:
+        if self._status_lock_until_refresh:
+            return
+        if self._copy_blink_timer:
+            self._copy_blink_timer.stop()
+        self._copy_blink_active = True
+        self._copy_blink_i = 0
+        self._copy_blink_addr = address
+        self._tick_copy_blink()
+
+    def _tick_copy_blink(self) -> None:
+        if not self._copy_blink_active:
+            return
+        if self._status_lock_until_refresh:
+            self._copy_blink_active = False
+            return
+        blink_on = (self._copy_blink_i % 2) == 0
+        icon = "⧉" if blink_on else "[dim]⧉[/dim]"
+        self._set_status(f"✅ Address copied {icon}")
+        self._copy_blink_i += 1
+        if self._copy_blink_i >= 6:
+            self._copy_blink_active = False
+            self._set_status(f"✅ Address copied: {self._copy_blink_addr}")
+            return
+        self._copy_blink_timer = self.set_timer(
+            Config.STATUS_BLINK_INTERVAL_SECONDS,
+            self._tick_copy_blink,
+        )
 
     def _start_breathing_effect(
         self,
@@ -9726,13 +10034,17 @@ class WalletApp(App):
 
         for idx, a in enumerate(self.accounts, start=1):
             tag = " (watch)" if a.enc is None else ""
-            # Shorten address for display
-            addr_short = a.address[:10] + "…" + a.address[-8:]
-            # Align addresses by using fixed-width name column
             name_with_tag = f"{a.name}{tag}"
             marker = self._marker_for_address(a.address)
-            label_text = f"{idx:<2} {name_with_tag:<26} │ {addr_short}{marker}"
-            lv.append(ListItem(Label(label_text)))
+            name_text = f"{idx:<2} {name_with_tag}"
+            row = Horizontal(
+                Label(name_text, classes="account_name", markup=True),
+                Label("│", classes="account_sep", markup=True),
+                Label(a.address, classes="account_address", markup=True),
+                Button("⧉", id=f"copy_addr_{idx - 1}", classes="copy_addr"),
+                Label(marker, classes="account_marker"),
+            )
+            lv.append(ListItem(row))
 
         if self.accounts:
             # Don't auto-select on startup; wait for user intent.
@@ -9803,9 +10115,10 @@ class WalletApp(App):
             lv = self.query_one("#accounts", ListView)
             item = list(lv.children)[idx]
             label = item.query_one(Label)
+            marker_label = item.query_one(".account_marker", Label)
             acc = self.accounts[idx]
             tag = " (watch)" if acc.enc is None else ""
-            addr_short = acc.address[:10] + "…" + acc.address[-8:]
+            addr_full = acc.address
             name_with_tag = f"{acc.name}{tag}"
             if loading:
                 suffix_text = loading_suffix or "Loading..."
@@ -9813,7 +10126,14 @@ class WalletApp(App):
             else:
                 suffix = ""
             marker = self._marker_for_address(acc.address)
-            label.update(f"{idx + 1:<2} {name_with_tag:<26} │ {addr_short}{suffix}{marker}")
+            try:
+                name_label = item.query_one(".account_name", Label)
+                addr_label = item.query_one(".account_address", Label)
+                name_label.update(f"{idx + 1:<2} {name_with_tag}")
+                addr_label.update(f"{addr_full}{suffix}")
+            except Exception:
+                label.update(f"{idx + 1:<2} {name_with_tag} │ {addr_full}{suffix}")
+            marker_label.update(marker)
         except Exception:
             pass
 
@@ -10089,6 +10409,30 @@ class WalletApp(App):
                 log_error("Failed to select first transaction", exception=e)
         self._set_pending_blink(has_pending)
 
+    def _update_history_row_for_pending(self, oph: str, address: str) -> None:
+        if not self.selected or self.selected.address != address:
+            return
+        try:
+            idx = next(i for i, it in enumerate(self.history_items) if (it.get("hash") or "") == oph)
+        except StopIteration:
+            return
+        with self._pending_ops_lock:
+            pending = self._pending_ops.get(oph)
+            if not pending:
+                return
+            self.history_items[idx] = dict(pending)
+        try:
+            hv = self.query_one("#history", ListView)
+            rows = list(hv.children)
+            if idx >= len(rows):
+                return
+            label = rows[idx].query_one(Label)
+            label.update(self._format_history_line(idx + 1, self.history_items[idx]))
+        except Exception as e:
+            log_error("Failed to update pending history row", exception=e)
+        has_pending = any((it.get("status") or "").upper() in ("PENDING", "PROCESSING") for it in self.history_items)
+        self._set_pending_blink(has_pending)
+
     def _format_history_line(self, idx: int, it: dict) -> str:
         ts_raw = it.get("ts") or ""
         ts = format_relative_time(ts_raw)
@@ -10120,13 +10464,13 @@ class WalletApp(App):
         elif entrypoint == "stake":
             type_raw = "STK"
         elif entrypoint == "unstake":
-            type_raw = "UST"
+            type_raw = "USTK"
         else:
             type_raw = "TX"
 
         if type_raw == "DLG":
             type_text = f"[yellow]{type_raw:<4}[/yellow]"
-        elif type_raw in ("STK", "UST"):
+        elif type_raw in ("STK", "USTK"):
             type_text = f"[#8b5cf6]{type_raw:<4}[/#8b5cf6]"
         else:
             type_text = f"{type_raw:<4}"
@@ -10382,6 +10726,41 @@ class WalletApp(App):
         alias = info.get("alias") if info else None
         return alias or baker_addr
 
+    def _shorten_baker_label(self, label: str) -> str:
+        if not label:
+            return label
+        if (label.startswith("tz") or label.startswith("KT1")) and len(label) > 16:
+            return f"{label[:6]}…{label[-4:]}"
+        return label
+
+    def _resolve_baked_by_label(
+        self,
+        rpc: str,
+        oph: str,
+        *,
+        wait_seconds: float = 0.0,
+    ) -> Optional[str]:
+        deadline = time.time() + max(0.0, wait_seconds)
+        while True:
+            baker_addr = None
+            try:
+                baker_addr = find_baker_for_operation(rpc, oph)
+            except Exception as e:
+                log_warning("Failed to resolve baker for op", exception=e, oph=oph)
+            if baker_addr:
+                try:
+                    label = self._format_baker_label(baker_addr)
+                except Exception as e:
+                    log_warning("Failed to format baker label", exception=e, baker_addr=baker_addr)
+                    label = baker_addr
+                label = self._shorten_baker_label(label)
+                if label and label != "?":
+                    return label
+            if time.time() >= deadline:
+                break
+            time.sleep(1.0)
+        return None
+
     def _add_pending_tx(
         self,
         *,
@@ -10425,6 +10804,15 @@ class WalletApp(App):
             self._pending_ops[oph] = item
         self._persist_pending_ops()
 
+        # Ensure source wallet is selected so pending row is visible immediately.
+        if not self.selected or self.selected.address != address:
+            self._select_account_by_address(address)
+
+        if self.selected and self.selected.address == address:
+            merged_items = self._merge_history_with_pending(self.history_items, address, resolve_pending=False)
+            merged_items = merged_items[: self.history_limit]
+            self._render_history(merged_items)
+
         # UX: assume OK after a short delay, then verify quietly in background
         try:
             if processing_delay > 0:
@@ -10444,10 +10832,7 @@ class WalletApp(App):
         except Exception as e:
             log_error("Failed to schedule pending op checks", exception=e)
 
-        if self.selected and self.selected.address == address:
-            if history_delay <= 0:
-                self._invalidate_history_cache(address)
-                self._load_history_for_selected(force=True, quiet=True)
+        # Skip full history refresh here; pending rows update in-place for smoother UX.
 
     def _assume_pending_ok(self, oph: str, address: str) -> None:
         with self._pending_ops_lock:
@@ -10458,9 +10843,7 @@ class WalletApp(App):
                 pending["status"] = "CONFIRMED"
                 pending["processing_until"] = None
                 self._persist_pending_ops()
-        if self.selected and self.selected.address == address:
-            self._invalidate_history_cache(address)
-            self._load_history_for_selected(force=True, quiet=True)
+        self._update_history_row_for_pending(oph, address)
 
     def _finalize_processing_ok(self, oph: str, address: str) -> None:
         with self._pending_ops_lock:
@@ -10472,9 +10855,7 @@ class WalletApp(App):
                 pending["processing_until"] = None
                 self._persist_pending_ops()
 
-        if self.selected and self.selected.address == address:
-            self._invalidate_history_cache(address)
-            self._load_history_for_selected(force=True, quiet=True)
+        self._update_history_row_for_pending(oph, address)
 
     def _verify_pending_op(self, oph: str, address: str) -> None:
         """Verify pending op quietly without blocking UI."""
@@ -10513,9 +10894,7 @@ class WalletApp(App):
                     pending["status"] = "UNKNOWN"
             self._persist_pending_ops()
 
-        if self.selected and self.selected.address == address:
-            self._invalidate_history_cache(address)
-            self._load_history_for_selected(force=True, quiet=True)
+        self._update_history_row_for_pending(oph, address)
 
     # -------------------------
     # Recents helpers
@@ -10576,6 +10955,22 @@ class WalletApp(App):
         self._invalidate_balance_cache(self.selected.address)
         self._update_status_balance()
         self._invalidate_history_cache(self.selected.address)
+        self._load_history_for_selected(force=True, quiet=True)
+
+    def _refresh_account_status_only(self, address: Optional[str] = None) -> None:
+        """Refresh balance/delegation/stake status without reloading history."""
+        if not self.selected:
+            return
+        if address and self.selected.address != address:
+            return
+        self._invalidate_balance_cache(self.selected.address)
+        self._update_status_balance()
+
+    def _silent_refresh_history_for(self, address: str) -> None:
+        """Silently refresh history for an address if it's still selected."""
+        if not self.selected or self.selected.address != address:
+            return
+        self._invalidate_history_cache(address)
         self._load_history_for_selected(force=True, quiet=True)
 
     def action_toggle_auto_refresh(self) -> None:
@@ -10801,7 +11196,7 @@ class WalletApp(App):
         line = random.choice(exit_lines)
         message = f"[b #f59e0b]{line}[/b #f59e0b]\n\nAre you sure you want to exit?"
         confirmed = await self.push_screen_wait(
-            ConfirmScreen(
+            ExitConfirmScreen(
                 message,
                 title="Exit",
                 yes_label="Exit",
@@ -10957,6 +11352,12 @@ class WalletApp(App):
             except StopIteration:
                 pass
 
+            pre_staked_mutez = None
+            try:
+                pre_staked_mutez = get_staking_balance(self.rpc, account.address)
+            except Exception as e:
+                log_warning("Failed to fetch staked balance before staking", exception=e, address=account.address)
+
             flow_start = time.time()
             self._start_breathing_effect(
                 "⏳ Staking... This may take a moment...",
@@ -10984,8 +11385,15 @@ class WalletApp(App):
                 remaining = Config.TX_FLOW_TOTAL_SECONDS
             if remaining <= 0.1:
                 remaining = Config.TX_FLOW_TOTAL_SECONDS
-            baker_addr = get_delegation_info(self.rpc, account.address)
-            baker_label = self._format_baker_label(baker_addr)
+            baker_addr = None
+            baker_label = "The baker"
+            try:
+                baker_addr = get_delegation_info(self.rpc, account.address)
+                if baker_addr:
+                    baker_label = self._format_baker_label(baker_addr)
+                    baker_label = self._shorten_baker_label(baker_label)
+            except Exception as e:
+                log_warning("Failed to resolve delegate baker for stake", exception=e, address=account.address)
             self._add_pending_tx(
                 address=account.address,
                 oph=op_hash,
@@ -11004,18 +11412,39 @@ class WalletApp(App):
                 bright_class="status-stake",
                 dim_class="status-stake-dim",
             )
+            is_first_stake = pre_staked_mutez is not None and pre_staked_mutez <= 0
+            baked_by_box = {"label": None}
+            if not is_first_stake:
+                def _resolve_label() -> None:
+                    baked_by_box["label"] = self._resolve_baked_by_label(
+                        self.rpc,
+                        op_hash,
+                        wait_seconds=remaining,
+                    )
+                self.run_worker(_resolve_label, exclusive=False, thread=True)
 
             def _finish_stake_status() -> None:
                 self._stop_breathing_effect()
+                if is_first_stake:
+                    label = baker_label
+                    if label and label not in ("?", "The baker"):
+                        msg = f"✅ Staked {format_xtz(amount)} XTZ with {label}! 💪🔥"
+                    else:
+                        msg = f"✅ Staked {format_xtz(amount)} XTZ successfully! 💪🔥"
+                else:
+                    label = baked_by_box["label"]
+                    baked_msg = get_send_baked_message(label)
+                    msg = f"✅ Staked {format_xtz(amount)} XTZ — {baked_msg}"
                 self._set_status_styled(
-                    f"✅ Staked {format_xtz(amount)} XTZ successfully! 💪🔥",
+                    msg,
                     style="stake",
                     duration=0.0,
                     force=True,
                 )
 
             self.set_timer(remaining, _finish_stake_status)
-            self._schedule_after(remaining, self._refresh_account)
+            self._schedule_after(remaining, lambda: self._refresh_account_status_only(account.address))
+            self._schedule_after(remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
 
         except Exception as e:
 
@@ -11165,8 +11594,15 @@ class WalletApp(App):
             remaining = self._tx_flow_remaining(flow_start)
             if remaining <= 0.1:
                 remaining = Config.TX_FLOW_TOTAL_SECONDS
-            baker_addr = get_delegation_info(self.rpc, account.address)
-            baker_label = self._format_baker_label(baker_addr)
+            baker_addr = None
+            baker_label = "The baker"
+            try:
+                baker_addr = get_delegation_info(self.rpc, account.address)
+                if baker_addr:
+                    baker_label = self._format_baker_label(baker_addr)
+                    baker_label = self._shorten_baker_label(baker_label)
+            except Exception as e:
+                log_warning("Failed to resolve delegate baker for unstake", exception=e, address=account.address)
             self._add_pending_tx(
                 address=account.address,
                 oph=op_hash,
@@ -11185,18 +11621,29 @@ class WalletApp(App):
                 bright_class="status-unstake",
                 dim_class="status-unstake-dim",
             )
+            baked_by_box = {"label": None}
+            def _resolve_label() -> None:
+                baked_by_box["label"] = self._resolve_baked_by_label(
+                    self.rpc,
+                    op_hash,
+                    wait_seconds=remaining,
+                )
+            self.run_worker(_resolve_label, exclusive=False, thread=True)
 
             def _finish_unstake_status() -> None:
                 self._stop_breathing_effect()
+                label = baked_by_box["label"]
+                baked_msg = get_send_baked_message(label)
                 self._set_status_styled(
-                    f"⚰️ Unstaked {format_xtz(amount)} XTZ. The network feels a little less safe. 😔",
+                    f"⚰️ Unstaked {format_xtz(amount)} XTZ — {baked_msg}",
                     style="unstake",
                     duration=0.0,
                     force=True,
                 )
 
             self.set_timer(remaining, _finish_unstake_status)
-            self._schedule_after(remaining, self._refresh_account)
+            self._schedule_after(remaining, lambda: self._refresh_account_status_only(account.address))
+            self._schedule_after(remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
 
         except Exception as e:
 
@@ -11343,7 +11790,8 @@ class WalletApp(App):
                     style="warning",
                 ),
             )
-            self._schedule_after(remaining, self._refresh_account)
+            self._schedule_after(remaining, lambda: self._refresh_account_status_only(account.address))
+            self._schedule_after(remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
             self._schedule_after(remaining, self._stop_breathing_effect)
 
         except Exception as e:
@@ -11579,6 +12027,7 @@ class WalletApp(App):
                     selection.get("name", ""),
                     selection.get("secret", ""),
                     selection.get("passphrase", ""),
+                    selection.get("secret_passphrase", ""),
                 )
             elif mode == "mnemonic":
                 await self._import_with_mnemonic_data(
@@ -11708,6 +12157,7 @@ class WalletApp(App):
                 resp.get("name", ""),
                 resp.get("secret", ""),
                 resp.get("passphrase", ""),
+                resp.get("secret_passphrase", ""),
             )
             return False
 
@@ -11733,10 +12183,17 @@ class WalletApp(App):
             self._set_status_styled(f"❌ Import failed: {e}", style="error", duration=5.0)
             return False
 
-    async def _import_with_secret_key_data(self, name: str, secret: str, pw: str) -> None:
+    async def _import_with_secret_key_data(
+        self,
+        name: str,
+        secret: str,
+        pw: str,
+        secret_passphrase: str = "",
+    ) -> None:
         name = (name or "").strip()
         secret = (secret or "").strip()
         pw = pw or ""
+        secret_passphrase = secret_passphrase or ""
 
         if not name:
             self._set_status("↩️ Import cancelled - Name required! 🏷️")
@@ -11748,9 +12205,13 @@ class WalletApp(App):
             self._set_status("↩️ Import cancelled - Passphrase required! 🔐")
             return
 
+        if secret.startswith("edsk") and not secret_passphrase:
+            self._set_status("↩️ Import cancelled - Passphrase required for encrypted secret key! 🔐")
+            return
+
         self._set_status("🔮 Deriving your address from the secret key...")
         try:
-            key = key_from_encoded_secret(secret)
+            key = key_from_encoded_secret(secret, passphrase=secret_passphrase)
             addr = key.public_key_hash()
             self._set_status(f"✨ Address derived: {addr}")
         except Exception as e:
@@ -12032,16 +12493,35 @@ class WalletApp(App):
         to_addr = send_data["to_addr"]
         amount = send_data["amount"]
         key = send_data["key"]
+        try:
+            key_pkh = key.public_key_hash()
+            if key_pkh != from_account.address:
+                self._set_status(
+                    "❌ KEY MISMATCH! Wallet address doesn't match decrypted key. Re-import the wallet.",
+                    force=True,
+                )
+                return
+        except Exception as e:
+            log_error("Failed to validate decrypted key", exception=e, address=from_account.address)
+            self._set_status("❌ Failed to validate wallet key. Try again.", force=True)
+            return
 
         # Ensure the source wallet is selected so history/status updates match the send
         try:
             idx = next(i for i, acc in enumerate(self.accounts) if acc.address == from_account.address)
             if self._last_selected_addr != from_account.address:
-                self._ui(self._apply_account_selection, idx, refresh_details=False, refresh_history=False)
+                self._apply_account_selection(idx, refresh_details=False, refresh_history=False)
         except StopIteration:
             pass
 
         self._send_in_progress = True
+        self._send_in_progress_token = time.time()
+        token = self._send_in_progress_token
+        if token is not None:
+            self.set_timer(
+                Config.SEND_FAILSAFE_SECONDS,
+                lambda: self._send_failsafe(token, from_account.address),
+            )
         self._send_and_refresh(
             from_account.address,
             key,
@@ -12066,6 +12546,7 @@ class WalletApp(App):
     ) -> None:
         logging.info(f"Sending {amount} XTZ from {from_addr} to {to_addr}")
         logging.debug(f"  fee_mutez={fee_mutez}, gas_limit={gas_limit}, storage_limit={storage_limit}")
+        self._ui(setattr, self, "_status_lock_until_refresh", False)
         self._ui(self._set_busy, True)
         self._ui(self._clear_tx_link)  # Clear any previous transaction link
 
@@ -12087,29 +12568,67 @@ class WalletApp(App):
 
             flow_start = time.time()
             self._ui(self._stop_spinner)
+            try:
+                balance_mutez = get_balance_mutez(rpc_to_use, from_addr)
+                fee_guess = fee_mutez if fee_mutez is not None else 1200
+                if not is_revealed(rpc_to_use, from_addr):
+                    fee_guess += 1300
+                total_needed = _xtz_to_mutez(amount) + int(fee_guess)
+                if balance_mutez < total_needed:
+                    msg = "❌ Saldo insuficiente para enviar."
+                    try:
+                        staked_mutez = get_staking_balance(rpc_to_use, from_addr)
+                        if staked_mutez > 0:
+                            msg = "❌ Saldo disponible insuficiente (tienes fondos en staking)."
+                    except Exception:
+                        pass
+                    self._ui(self._set_status, msg, force=True)
+                    return
+            except Exception as e:
+                log_warning("Pre-send balance check failed", exception=e, address=from_addr)
             self._ui(
                 self._start_breathing_effect,
-                "📤 Sending tx to the baker…",
+                "🥐 Into the oven we go… your baker’s on it!",
                 bright_class="status-success",
                 dim_class="status-success-dim",
             )
 
-            rpc_used, oph = self._with_rpc_fallback(
-                action="send",
-                rpc=rpc_to_use,
-                fn=lambda r: send_xtz(
-                    r,
-                    key,
-                    to_addr,
-                    amount,
-                    fee_mutez=fee_mutez,
-                    gas_limit=gas_limit,
-                    storage_limit=storage_limit,
-                ),
-            )
+            try:
+                rpc_used, oph = self._with_rpc_fallback(
+                    action="send",
+                    rpc=rpc_to_use,
+                    fn=lambda r: send_xtz(
+                        r,
+                        key,
+                        to_addr,
+                        amount,
+                        fee_mutez=fee_mutez,
+                        gas_limit=gas_limit,
+                        storage_limit=storage_limit,
+                    ),
+                )
+            except Exception as e:
+                if fee_mutez is not None or gas_limit is not None or storage_limit is not None:
+                    log_warning("Send with overrides failed; retrying with autofill", exception=e)
+                    rpc_used, oph = self._with_rpc_fallback(
+                        action="send",
+                        rpc=rpc_to_use,
+                        fn=lambda r: send_xtz(
+                            r,
+                            key,
+                            to_addr,
+                            amount,
+                            fee_mutez=None,
+                            gas_limit=None,
+                            storage_limit=None,
+                        ),
+                    )
+                else:
+                    raise
             logging.info(f"Transaction injected: {oph}")
 
             self._push_recent_to(from_addr, to_addr)
+            baker_label_box = {"label": None}
             remaining = self._tx_flow_remaining(flow_start)
             if remaining <= 0.1:
                 remaining = Config.TX_FLOW_TOTAL_SECONDS
@@ -12133,12 +12652,16 @@ class WalletApp(App):
             def _finish_send() -> None:
                 try:
                     self._stop_breathing_effect()
-                    baked_msg = get_send_baked_message(None)
-                    self._set_status_styled_locked(f"✓ 🥖 {baked_msg}", "success")
+                    label = baker_label_box["label"]
+                    baked_msg = get_send_baked_message(label)
+                    self._set_status_styled_locked(
+                        f"✅ {baked_msg}",
+                        "success",
+                    )
                     self._show_tx_link(oph_short, tzkt_link)
                     self._invalidate_history_cache(from_addr)
                     self._invalidate_balance_cache(from_addr)
-                    self._load_history_for_selected(force=True, quiet=True)
+                    self._schedule_after(60.0, lambda: self._load_history_for_selected(force=True, quiet=True))
                     try:
                         self.query_one("#history", ListView).focus()
                     except Exception as e:
@@ -12151,22 +12674,41 @@ class WalletApp(App):
                     self._refresh_account_row(from_addr)
                     self._set_busy(False)
                     self._send_in_progress = False
+                    self._send_in_progress_token = None
 
             self._ui(self._schedule_after, remaining, _finish_send)
             finalize_scheduled = True
+            try:
+                resolved_label = self._resolve_baked_by_label(
+                    rpc_used,
+                    oph,
+                    wait_seconds=remaining,
+                )
+                baker_label_box["label"] = resolved_label
+            except Exception as e:
+                log_warning("Failed to resolve baked-by baker for send", exception=e, oph=oph)
 
         except Exception as e:
             log_error("Transaction failed", exception=e)
             self._ui(self._stop_breathing_effect)
-            self._ui(self._set_status, f"❌ Baking failed: {e}")
+            msg = f"❌ Baking failed: {e}"
+            s = str(e)
+            if "subtraction_underflow" in s:
+                msg = "❌ Saldo insuficiente para enviar."
+            self._ui(self._set_status, msg, force=True)
             self._ui(self._clear_tx_link)  # Clear link on error
         finally:
             if not finalize_scheduled:
-                self._ui(self._stop_breathing_effect)
-                self._ui(self._clear_account_loading, from_addr)
-                self._ui(self._refresh_account_row, from_addr)
-                self._ui(self._set_busy, False)
-                self._ui(setattr, self, '_send_in_progress', False)
+                # Ensure the send lock is released even if UI callbacks fail.
+                self._send_in_progress = False
+                self._send_in_progress_token = None
+                try:
+                    self._ui(self._stop_breathing_effect)
+                    self._ui(self._clear_account_loading, from_addr)
+                    self._ui(self._refresh_account_row, from_addr)
+                    self._ui(self._set_busy, False)
+                except Exception as e:
+                    log_warning("Failed to finalize send cleanup", exception=e, address=from_addr)
 
     # --- Button wiring ---
     @on(Button.Pressed, "#add")

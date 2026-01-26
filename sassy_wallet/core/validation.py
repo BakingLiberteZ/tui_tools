@@ -9,6 +9,8 @@ from decimal import Decimal, InvalidOperation
 import re
 from typing import Tuple, Optional
 
+from pytezos.crypto.encoding import base58_decode
+
 
 # Tezos address patterns with full validation
 _TZ1_RE = re.compile(r"^tz1[1-9A-HJ-NP-Za-km-z]{33}$")
@@ -111,27 +113,47 @@ def validate_tezos_address(addr: str, allow_kt1: bool = True) -> Tuple[bool, Opt
     if len(addr) != 36:
         return False, f"Invalid address length: {len(addr)} (must be 36 characters)"
 
-    # Check prefix
+    # Check prefix and base58 checksum
     if addr.startswith("tz1"):
         if _TZ1_RE.match(addr):
+            try:
+                base58_decode(addr.encode("utf-8"))
+            except Exception:
+                return False, "🥐 Wrong dough — checksum doesn't rise (tz1)"
             return True, None
         return False, "Invalid tz1 address format (check for invalid characters)"
     elif addr.startswith("tz2"):
         if _TZ2_RE.match(addr):
+            try:
+                base58_decode(addr.encode("utf-8"))
+            except Exception:
+                return False, "🥐 Wrong dough — checksum doesn't rise (tz2)"
             return True, None
         return False, "Invalid tz2 address format (check for invalid characters)"
     elif addr.startswith("tz3"):
         if _TZ3_RE.match(addr):
+            try:
+                base58_decode(addr.encode("utf-8"))
+            except Exception:
+                return False, "🥐 Wrong dough — checksum doesn't rise (tz3)"
             return True, None
         return False, "Invalid tz3 address format (check for invalid characters)"
     elif addr.startswith("tz4"):
         if _TZ4_RE.match(addr):
+            try:
+                base58_decode(addr.encode("utf-8"))
+            except Exception:
+                return False, "🥐 Wrong dough — checksum doesn't rise (tz4)"
             return True, None
         return False, "Invalid tz4 address format (check for invalid characters)"
     elif addr.startswith("KT1"):
         if not allow_kt1:
             return False, "KT1 addresses are not valid for this operation (must use tz1/tz2/tz3/tz4)"
         if _KT1_RE.match(addr):
+            try:
+                base58_decode(addr.encode("utf-8"))
+            except Exception:
+                return False, "🥐 Wrong dough — checksum doesn't rise (KT1)"
             return True, None
         return False, "Invalid KT1 address format (check for invalid characters)"
     else:

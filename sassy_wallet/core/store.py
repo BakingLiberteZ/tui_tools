@@ -32,7 +32,7 @@ class TxPrefs(TypedDict, total=False):
 def _default_store() -> Dict[str, Any]:
     # default: ghostnet (seguro) si no existe el archivo
     return {
-        "rpc": "https://ghostnet.tezos.marigold.dev",
+        "rpc": "https://rpc.tzkt.io/ghostnet",
         "accounts": [],
         "recent_to": [],  # Legacy, kept for backwards compatibility
         "recent_to_by_wallet": {},  # New: per-wallet recent destinations

@@ -2,6 +2,7 @@ import random
 
 
 BAKED_MESSAGES_WITH_BAKER = [
+    "Baker {baker} has baked your operation! Oven's clear.",
     "Crispy golden bread on the shelves - baked by {baker}.",
     "Fresh loaf delivered to the shelves - baked by {baker}.",
     "Oven log updated: baked by {baker}.",
@@ -16,6 +17,7 @@ BAKED_MESSAGES_WITH_BAKER = [
 ]
 
 BAKED_MESSAGES_GENERIC = [
+    "Baker has baked your operation! Oven's clear.",
     "Crispy golden bread on the shelves.",
     "Fresh loaf delivered to the shelves.",
     "Oven log updated. Bread is ready.",

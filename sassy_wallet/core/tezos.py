@@ -413,7 +413,12 @@ def xtz_to_mutez(x: Decimal) -> int:
     return int((x * Decimal(1_000_000)).to_integral_value())
 
 
-def key_from_encoded_secret(encoded: str) -> Key:
+def key_from_encoded_secret(encoded: str, passphrase: str | None = None) -> Key:
+    if passphrase:
+        try:
+            return Key.from_encoded_key(encoded, passphrase=passphrase)
+        except TypeError:
+            return Key.from_encoded_key(encoded)
     return Key.from_encoded_key(encoded)
 
 
