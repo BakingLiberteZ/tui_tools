@@ -55,10 +55,10 @@ def inject_signed_operation(rpc: str, signed_op_hex: str) -> str:
     log_debug(f"[INJECTION DEBUG] Body first 100 chars: {data[:100]}")
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = resp.read().decode().strip().strip('"')
-            log_debug(f"[INJECTION DEBUG] Success! Op hash: {result}")
-            return result
+        data_bytes = _urlopen_bytes_with_retries(req, timeout=30, retries=3)
+        result = data_bytes.decode().strip().strip('"')
+        log_debug(f"[INJECTION DEBUG] Success! Op hash: {result}")
+        return result
     except urllib.error.HTTPError as e:
         error_body = e.read().decode() if e.fp else str(e)
         log_error(f"[INJECTION DEBUG] Failed: {e.code} - {error_body}")
@@ -553,6 +553,31 @@ def _urlopen_json_with_retries(req: urllib.request.Request, timeout: int = 15, r
         raise last_err
     else:
         raise RuntimeError("Failed to fetch JSON")
+
+
+def _urlopen_bytes_with_retries(req: urllib.request.Request, timeout: int = 15, retries: int = 3) -> bytes:
+    """
+    Fetch raw bytes via urllib with a few retries to smooth out transient TLS/EOF issues.
+    Returns response body bytes.
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
+                return resp.read()
+        except (ssl.SSLError, urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            last_err = e
+            log_error(f"Network error on attempt {attempt}/{retries}", exception=e, url=req.full_url)
+            if attempt >= retries:
+                break
+            time.sleep(0.4 * attempt)
+        except Exception as e:
+            log_error("Non-network error in URL fetch", exception=e, url=req.full_url)
+            raise
+    if last_err:
+        log_error("All retry attempts exhausted", exception=last_err, url=req.full_url)
+        raise last_err
+    raise RuntimeError("Failed to fetch bytes")
 
 
 def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, Any]]:

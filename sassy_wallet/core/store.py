@@ -131,6 +131,9 @@ def list_accounts(data: Dict[str, Any]) -> List[Account]:
         if enc and isinstance(enc, dict):
             if "ct_b64" not in enc and "ctt_b64" in enc:
                 enc["ct_b64"] = enc.pop("ctt_b64")
+            required = ("salt_b64", "nonce_b64", "ct_b64")
+            if not all(isinstance(enc.get(k), str) and enc.get(k).strip() for k in required):
+                enc = None
 
         out.append(
             Account(
