@@ -32,6 +32,11 @@ python -m sassy_wallet
 - Safer key handling UX + recovery helpers
 - UI themes + custom keybindings
 
+## Missing features
+
+- Un-delegation button: not our problem. We build tools for stakers, not waverers.
+- Switching baker for stake: not baked yet.
+
 ## Why this exists
 
 Most wallets treat you like a baby. This one treats you like a grown-up baker.
