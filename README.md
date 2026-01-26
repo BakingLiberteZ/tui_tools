@@ -1,4 +1,4 @@
-# 🥖 Sassy Wallet
+# 💅 Sassy Wallet
 
 **A Tezos TUI wallet with opinions, jokes, and real controls.**
 
