@@ -126,7 +126,7 @@ def get_staking_message(context: StakingContext) -> str:
 if __name__ == "__main__":
     print("💪 Staking Messages Library Test\n")
 
-    contexts = ["chad", "boring", "lazy"]
+    contexts: list[StakingContext] = ["chad", "boring", "lazy"]
 
     for context in contexts:
         print(f"{context.upper()}:")

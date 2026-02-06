@@ -1,4 +1,5 @@
 import urllib.error
+from email.message import Message
 
 from sassy_wallet.core import tezos
 
@@ -31,7 +32,7 @@ def test_infer_is_staking_falls_back_when_staking_endpoint_missing(monkeypatch):
     def _fake_urlopen(req, timeout=15, retries=3):
         url = req.full_url
         if "/v1/operations/staking?" in url:
-            raise urllib.error.HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
+            raise urllib.error.HTTPError(url, 404, "Not Found", hdrs=Message(), fp=None)
         if "/v1/operations/transactions?" in url and "entrypoint=stake" in url:
             return [{"level": 50}]
         if "/v1/operations/transactions?" in url and "entrypoint=unstake" in url:

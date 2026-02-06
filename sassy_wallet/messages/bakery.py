@@ -410,7 +410,7 @@ def get_wallet_loading_message() -> str:
 if __name__ == "__main__":
     print("🥖 Bakery Messages Library Test\n")
 
-    contexts = [
+    contexts: list[tuple[MessageContext, dict[str, str]]] = [
         ("rpc_hot", {}),
         ("rpc_checking", {}),
         ("tx_baking", {}),

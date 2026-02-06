@@ -6,7 +6,7 @@ def test_stake_selector_row_places_delegation_status_on_second_line() -> None:
     account = Account(
         name="Test Wallet",
         address="tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb",
-        enc=object(),
+        enc=None,
     )
     screen = StakeScreen(accounts=[account], rpc="https://rpc.tzkt.io/mainnet")
 
@@ -30,7 +30,7 @@ def test_stake_selector_row_shows_not_delegated_on_second_line() -> None:
     account = Account(
         name="Test Wallet",
         address="tz1aSkwEot3L2kmUvcoxzjMomb9mvBNuzFK6",
-        enc=object(),
+        enc=None,
     )
     screen = StakeScreen(accounts=[account], rpc="https://rpc.tzkt.io/mainnet")
 

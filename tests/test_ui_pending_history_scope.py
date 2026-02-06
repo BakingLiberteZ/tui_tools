@@ -1,10 +1,12 @@
 from decimal import Decimal
 from threading import RLock
 from types import SimpleNamespace
+import time
+from typing import Any, cast
 
 import pytest
 
-from sassy_wallet.ui.app import WalletApp
+from sassy_wallet.ui.app import WalletApp, Config
 
 
 def test_add_pending_tx_scopes_history_to_source_wallet_after_selection_switch():
@@ -22,7 +24,7 @@ def test_add_pending_tx_scopes_history_to_source_wallet_after_selection_switch()
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app._pending_ops_lock = RLock()
     app._pending_ops = {}
     app._history_cache_lock = RLock()
@@ -101,7 +103,7 @@ def test_add_pending_tx_keeps_previous_stake_row_when_unstake_is_added():
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app._pending_ops_lock = RLock()
     app._pending_ops = {}
     app._history_cache_lock = RLock()
@@ -190,7 +192,7 @@ def test_add_pending_tx_keeps_existing_history_for_all_operation_types(direction
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app._pending_ops_lock = RLock()
     app._pending_ops = {}
     app._history_cache_lock = RLock()
@@ -231,3 +233,245 @@ def test_add_pending_tx_keeps_existing_history_for_all_operation_types(direction
     hashes = [it.get("hash") for it in app.history_items]
     assert "op_existing" in hashes
     assert op_hash in hashes
+
+
+def test_resolve_delegate_for_pending_skips_change_baker_override(monkeypatch):
+    """Change-baker pending row must keep selected destination baker, not stale chain delegate."""
+    oph = "op_change_baker"
+    address = "tz1SOURCE11111111111111111111111111111"
+
+    class Dummy:
+        pass
+
+    app = cast(Any, Dummy())
+    app.rpc = "https://rpc.example"
+    app._pending_ops_lock = RLock()
+    app._pending_ops = {
+        oph: {
+            "hash": oph,
+            "address": address,
+            "entrypoint": "change_baker",
+            "counterparty": "Baker B",
+        }
+    }
+    app._op_entrypoint_overrides = {}
+    app._format_baker_label = lambda baker_addr: "Old Baker"
+    app._shorten_baker_label = lambda label: label
+    updates: list[str] = []
+    app._set_pending_counterparty = lambda _oph, _addr, cp: updates.append(cp)
+    app._ui = lambda fn, *args: fn(*args)
+
+    monkeypatch.setattr("sassy_wallet.ui.app.get_delegation_info", lambda rpc, addr: "tz1OLD")
+
+    WalletApp._resolve_delegate_for_pending(app, oph, address)
+
+    assert updates == []
+
+
+def test_merge_history_keeps_change_baker_pending_shadow_when_seen_on_chain():
+    """Keep short-lived change-baker shadow while within TTL and prefer its destination."""
+    address = "tz1SOURCE11111111111111111111111111111"
+    oph = "op_change_baker_keep_shadow"
+    now = time.time()
+
+    class Dummy:
+        pass
+
+    app = cast(Any, Dummy())
+    app._pending_ops_lock = RLock()
+    app._pending_ops = {
+        oph: {
+            "hash": oph,
+            "address": address,
+            "entrypoint": "change_baker",
+            "direction": "DEL",
+            "status": "CONFIRMED",
+            "counterparty": "Baker B",
+            "ts": "2026-02-06T12:00:00Z",
+            "ts_epoch": now,
+        }
+    }
+    app._op_entrypoint_overrides = {}
+    app._persist_pending_ops = lambda: None
+
+    chain_items = [
+        {
+            "hash": oph,
+            "status": "CONFIRMED",
+            "entrypoint": "delegation",
+            "direction": "DEL",
+            "counterparty": "Baker B",
+            "ts": "2026-02-06T12:00:00Z",
+        }
+    ]
+
+    merged = WalletApp._merge_history_with_pending(app, chain_items, address, resolve_pending=False)
+
+    assert len([it for it in merged if it.get("hash") == oph]) == 1
+    selected = next(it for it in merged if it.get("hash") == oph)
+    assert selected.get("counterparty") == "Baker B"
+    assert oph in app._pending_ops
+
+
+def test_merge_history_prefers_change_baker_pending_destination_over_stale_chain_row():
+    """When chain row disagrees, recent pending change-baker row should win temporarily."""
+    address = "tz1SOURCE11111111111111111111111111111"
+    oph = "op_change_baker_prefer_pending"
+    now = time.time()
+
+    class Dummy:
+        pass
+
+    app = cast(Any, Dummy())
+    app._pending_ops_lock = RLock()
+    app._pending_ops = {
+        oph: {
+            "hash": oph,
+            "address": address,
+            "entrypoint": "change_baker",
+            "direction": "DEL",
+            "status": "CONFIRMED",
+            "counterparty": "Liberté",
+            "ts": "2026-02-06T12:01:00Z",
+            "ts_epoch": now,
+        }
+    }
+    app._op_entrypoint_overrides = {}
+    app._persist_pending_ops = lambda: None
+
+    chain_items = [
+        {
+            "hash": oph,
+            "status": "CONFIRMED",
+            "entrypoint": "delegation",
+            "direction": "DEL",
+            "counterparty": "Tezberry Pie",
+            "ts": "2026-02-06T12:01:00Z",
+        }
+    ]
+
+    merged = WalletApp._merge_history_with_pending(app, chain_items, address, resolve_pending=False)
+    selected = next(it for it in merged if it.get("hash") == oph)
+
+    assert selected.get("counterparty") == "Liberté"
+
+
+def test_merge_history_purges_expired_change_baker_shadow_when_seen_on_chain():
+    """Expired change-baker shadow must be purged to avoid polluting visible history."""
+    address = "tz1SOURCE11111111111111111111111111111"
+    oph = "op_change_baker_expired_shadow"
+    now = time.time()
+
+    class Dummy:
+        pass
+
+    app = cast(Any, Dummy())
+    app._pending_ops_lock = RLock()
+    app._pending_ops = {
+        oph: {
+            "hash": oph,
+            "address": address,
+            "entrypoint": "change_baker",
+            "direction": "DEL",
+            "status": "CONFIRMED",
+            "counterparty": "Baker B",
+            "ts": "2026-02-06T12:00:00Z",
+            "ts_epoch": now - (Config.CHANGE_BAKER_SHADOW_SECONDS + 1.0),
+        }
+    }
+    app._op_entrypoint_overrides = {}
+    app._persist_pending_ops = lambda: None
+
+    chain_items = [
+        {
+            "hash": oph,
+            "status": "CONFIRMED",
+            "entrypoint": "delegation",
+            "direction": "DEL",
+            "counterparty": "Baker B",
+            "ts": "2026-02-06T12:00:00Z",
+        }
+    ]
+
+    merged = WalletApp._merge_history_with_pending(app, chain_items, address, resolve_pending=False)
+
+    assert len([it for it in merged if it.get("hash") == oph]) == 1
+    assert oph not in app._pending_ops
+
+
+def test_merge_history_purges_expired_change_baker_shadow_when_missing_on_chain():
+    """Expired change-baker shadow not present on-chain must be removed (prevents stale crowding)."""
+    address = "tz1SOURCE11111111111111111111111111111"
+    oph = "op_change_baker_expired_missing"
+    now = time.time()
+
+    class Dummy:
+        pass
+
+    app = cast(Any, Dummy())
+    app._pending_ops_lock = RLock()
+    app._pending_ops = {
+        oph: {
+            "hash": oph,
+            "address": address,
+            "entrypoint": "change_baker",
+            "direction": "DEL",
+            "status": "CONFIRMED",
+            "counterparty": "Baker B",
+            "ts": "2026-02-06T12:00:00Z",
+            "ts_epoch": now - (Config.CHANGE_BAKER_SHADOW_SECONDS + 5.0),
+        }
+    }
+    app._op_entrypoint_overrides = {}
+    app._persist_pending_ops = lambda: None
+
+    merged = WalletApp._merge_history_with_pending(app, [], address, resolve_pending=False)
+
+    assert merged == []
+    assert oph not in app._pending_ops
+
+
+def test_merge_history_keeps_stake_visible_when_expired_change_baker_shadow_exists():
+    """Expired change-baker shadow must not displace real stake rows from merged history."""
+    address = "tz1SOURCE11111111111111111111111111111"
+    stake_hash = "op_stake_real"
+    old_change_hash = "op_change_old_shadow"
+    now = time.time()
+
+    class Dummy:
+        pass
+
+    app = cast(Any, Dummy())
+    app._pending_ops_lock = RLock()
+    app._pending_ops = {
+        old_change_hash: {
+            "hash": old_change_hash,
+            "address": address,
+            "entrypoint": "change_baker",
+            "direction": "DEL",
+            "status": "CONFIRMED",
+            "counterparty": "Baker B",
+            "ts": "2026-02-06T12:00:00Z",
+            "ts_epoch": now - (Config.CHANGE_BAKER_SHADOW_SECONDS + 10.0),
+        }
+    }
+    app._op_entrypoint_overrides = {}
+    app._persist_pending_ops = lambda: None
+
+    chain_items = [
+        {
+            "hash": stake_hash,
+            "status": "CONFIRMED",
+            "entrypoint": "stake",
+            "direction": "STK",
+            "counterparty": "Baker C",
+            "ts": "2026-02-06T12:01:00Z",
+        }
+    ]
+
+    merged = WalletApp._merge_history_with_pending(app, chain_items, address, resolve_pending=False)
+    hashes = [it.get("hash") for it in merged]
+
+    assert stake_hash in hashes
+    assert old_change_hash not in hashes
+    assert old_change_hash not in app._pending_ops

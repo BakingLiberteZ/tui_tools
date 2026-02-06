@@ -61,7 +61,7 @@ def _redact_value(value: Any) -> Any:
 class _RedactingFilter(logging.Filter):
     """Filter that redacts sensitive values from every log record."""
 
-    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+    def filter(self, record: logging.LogRecord) -> bool:
         record.msg = _redact_value(record.msg)
         if isinstance(record.args, tuple):
             record.args = tuple(_redact_value(v) for v in record.args)
@@ -73,12 +73,12 @@ class _RedactingFilter(logging.Filter):
 class _SecureRotatingFileHandler(RotatingFileHandler):
     """Rotating handler that enforces private file permissions."""
 
-    def _open(self):  # type: ignore[override]
+    def _open(self):
         stream = super()._open()
         _chmod_best_effort(Path(self.baseFilename), _PRIVATE_FILE_MODE)
         return stream
 
-    def doRollover(self) -> None:  # type: ignore[override]
+    def doRollover(self) -> None:
         super().doRollover()
         _chmod_best_effort(Path(self.baseFilename), _PRIVATE_FILE_MODE)
         for i in range(1, self.backupCount + 1):

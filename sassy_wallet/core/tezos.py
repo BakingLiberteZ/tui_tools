@@ -1,6 +1,7 @@
 from typing import Optional, Any, Dict, List, Callable
 from decimal import Decimal
 import json
+import re
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -50,6 +51,14 @@ _RPC_IO_EXCEPTIONS = (
 _PARSE_EXCEPTIONS = (TypeError, ValueError, KeyError, IndexError, AttributeError)
 _OP_RETRY_EXCEPTIONS = _RPC_IO_EXCEPTIONS + _PARSE_EXCEPTIONS + (RuntimeError, RpcError)
 _PENDING_UNKNOWN = "unknown"
+_DELEGATION_FALLBACK_SAFE_GAS = 1_040_000
+_DELEGATION_FALLBACK_TARGET_FEE = 8_000
+_DELEGATION_FALLBACK_MIN_FEE = 800
+_DELEGATION_FALLBACK_BALANCE_BUFFER = 500
+_INSUFFICIENT_BALANCE_RE = re.compile(
+    r"Balance of contract .* too low \((?P<balance>[0-9]*\.?[0-9]+)\) to spend (?P<needed>[0-9]*\.?[0-9]+)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _validate_request_url(req: urllib.request.Request) -> None:
@@ -115,6 +124,41 @@ def _is_counter_sync_error(exception: Exception) -> bool:
     """Check whether an RPC failure is caused by counter desynchronization."""
     error_str = str(exception).lower()
     return "counter" in error_str and ("not yet reached" in error_str or "already used" in error_str)
+
+
+def _friendly_insufficient_balance_error(exception: Exception | str, *, action: str) -> str | None:
+    """Convert low-balance injection errors into an actionable user-facing message."""
+    msg = str(exception)
+    match = _INSUFFICIENT_BALANCE_RE.search(msg)
+    if not match:
+        return None
+    balance_xtz = match.group("balance")
+    needed_xtz = match.group("needed")
+    return (
+        f"Insufficient balance for {action} fee "
+        f"(balance {balance_xtz} XTZ, needed {needed_xtz} XTZ). "
+        "Top up wallet or choose a lower fee."
+    )
+
+
+def _compute_delegate_fallback_fee_mutez(
+    rpc: str,
+    source_address: str,
+    requested_fee_mutez: Optional[int],
+) -> int:
+    """Pick a conservative delegation fallback fee while respecting low-balance wallets."""
+    fee = max(int(requested_fee_mutez or 0), _DELEGATION_FALLBACK_TARGET_FEE)
+    try:
+        balance_mutez = get_balance_mutez(rpc, source_address)
+    except _OP_RETRY_EXCEPTIONS + (OSError,):
+        return fee
+
+    spendable_cap = max(int(balance_mutez) - _DELEGATION_FALLBACK_BALANCE_BUFFER, 0)
+    if spendable_cap <= 0:
+        return max(int(requested_fee_mutez or 0), _DELEGATION_FALLBACK_MIN_FEE)
+    if spendable_cap < _DELEGATION_FALLBACK_MIN_FEE:
+        return spendable_cap
+    return min(fee, spendable_cap)
 
 
 def inject_signed_operation(rpc: str, signed_op_hex: str) -> str:
@@ -186,11 +230,11 @@ def sign_and_inject_from_rpc_forge(rpc: str, key: Key, rpc_forged_hex: str) -> s
     # ONLY decode if it's explicitly a string, otherwise treat as bytes
     if isinstance(sig_result, str):
         # Base58 string like "sigXXX...", decode it
-        log_debug(f"[SIGNATURE DEBUG] Decoding as base58 string...")
+        log_debug("[SIGNATURE DEBUG] Decoding as base58 string...")
         sig_bytes = base58_decode(sig_result.encode("utf-8"))
     else:
         # Bytes or bytes-like object, use directly
-        log_debug(f"[SIGNATURE DEBUG] Using as raw bytes...")
+        log_debug("[SIGNATURE DEBUG] Using as raw bytes...")
         sig_bytes = bytes(sig_result) if not isinstance(sig_result, bytes) else sig_result
 
     log_debug(f"[SIGNATURE DEBUG] sig_bytes length: {len(sig_bytes)} bytes")
@@ -673,8 +717,10 @@ def key_from_mnemonic_ledger(
 
     seed = Bip39SeedGenerator(mnemonic).Generate(passphrase)
     if derivation_path:
-        bip44_ctx = Bip44.FromSeedAndPath(seed, derivation_path)
-        bip44_acc = bip44_ctx
+        from_seed_and_path = getattr(Bip44, "FromSeedAndPath", None)
+        if not callable(from_seed_and_path):
+            raise RuntimeError("Custom derivation path is not supported by installed bip_utils")
+        bip44_acc = from_seed_and_path(seed, derivation_path)
     else:
         bip44_ctx = Bip44.FromSeed(seed, Bip44Coins.TEZOS)
         bip44_acc = (
@@ -774,7 +820,8 @@ def _delegate_from_updates(updates: list[dict]) -> str:
                 if isinstance(delegate, str):
                     return delegate
         if update.get("kind") == "staking" and isinstance(update.get("delegate"), str):
-            return update.get("delegate")
+            delegate = update.get("delegate")
+            return delegate if isinstance(delegate, str) else ""
     return ""
 
 
@@ -994,11 +1041,13 @@ def _urlopen_bytes_with_retries(req: urllib.request.Request, timeout: int = 15, 
 
 def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, Any]]:
     base = _tzkt_base_from_rpc(rpc)
+    sample_limit = max(int(limit or 0) * 4, 40)
+    staking_sample_limit = max(int(limit or 0) * 6, 60)
 
     tx_params = {
         "anyof.sender.target": address,
         "status": "applied",
-        "limit": str(limit * 2),
+        "limit": str(sample_limit),
         "sort.desc": "level",
         "withMetadata": "true",
     }
@@ -1008,7 +1057,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         "sender": address,
         "entrypoint": "stake",
         "status": "applied",
-        "limit": str(limit * 2),
+        "limit": str(sample_limit),
         "sort.desc": "level",
         "withMetadata": "true",
     }
@@ -1018,7 +1067,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         "sender": address,
         "entrypoint": "unstake",
         "status": "applied",
-        "limit": str(limit * 2),
+        "limit": str(sample_limit),
         "sort.desc": "level",
         "withMetadata": "true",
     }
@@ -1027,13 +1076,20 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
     deleg_params = {
         "sender": address,
         "status": "applied",
-        "limit": str(limit * 2),
+        "limit": str(sample_limit),
         "sort.desc": "level",
     }
     deleg_url = f"{base}/v1/operations/delegations?" + urllib.parse.urlencode(deleg_params)
+    staking_params = {
+        "sender": address,
+        "status": "applied",
+        "limit": str(staking_sample_limit),
+        "sort.desc": "level",
+    }
+    staking_url = f"{base}/v1/operations/staking?" + urllib.parse.urlencode(staking_params)
 
     now = time.time()
-    cache_key = f"{tx_url}|{stake_url}|{unstake_url}|{deleg_url}"
+    cache_key = f"{tx_url}|{stake_url}|{unstake_url}|{deleg_url}|{staking_url}"
     with _tzkt_history_cache_lock:
         cached = _tzkt_history_cache.get(cache_key)
         if cached:
@@ -1051,12 +1107,67 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         data = _urlopen_json_with_retries(req, timeout=15, retries=3)
         return data if isinstance(data, list) else []
 
+    def _fetch_list_optional(url: str) -> list[dict]:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": _USER_AGENT},
+            method="GET",
+        )
+        try:
+            data = _urlopen_json_with_retries(req, timeout=15, retries=3)
+        except urllib.error.HTTPError as e:
+            # Some networks/indexers may not expose staking endpoint variants.
+            log_debug("Optional TzKT history endpoint unavailable", exception=str(e), url=url)
+            return []
+        except _RPC_IO_EXCEPTIONS + _PARSE_EXCEPTIONS + (RuntimeError,) as e:
+            log_debug("Optional TzKT history endpoint failed", exception=str(e), url=url)
+            return []
+        return data if isinstance(data, list) else []
+
+    def _op_type(it: dict) -> str:
+        raw = it.get("type") or it.get("kind") or it.get("action") or ""
+        return str(raw).lower().strip()
+
+    def _as_int_mutez(v: Any) -> int:
+        if v is None:
+            return 0
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float):
+            return int(v)
+        try:
+            s = str(v).strip()
+            return int(s) if s else 0
+        except (TypeError, ValueError):
+            return 0
+
     tx_items = _fetch_list(tx_url)
     stake_items = _fetch_list(stake_url)
     unstake_items = _fetch_list(unstake_url)
     deleg_items = _fetch_list(deleg_url)
+    staking_items = _fetch_list_optional(staking_url)
+    deleg_hashes: set[str] = {
+        str(it.get("hash") or "").strip()
+        for it in deleg_items
+        if isinstance(it, dict) and str(it.get("hash") or "").strip()
+    }
     out: list[dict] = []
-    seen_hashes: set[str] = set()
+    seen_signatures_by_hash: dict[str, set[tuple[str, str, str, int]]] = {}
+    seen_no_hash_signatures: set[tuple[str, str, str, int, str, str]] = set()
+    stats = {
+        "tx_fetched": len(tx_items),
+        "stake_fetched": len(stake_items),
+        "unstake_fetched": len(unstake_items),
+        "staking_fetched": len(staking_items),
+        "deleg_fetched": len(deleg_items),
+        "drop_tx_pref_deleg": 0,
+        "drop_stake_pref_deleg": 0,
+        "drop_unstake_pref_deleg": 0,
+        "drop_staking_pref_deleg": 0,
+        "drop_seen_duplicate": 0,
+    }
 
     def _extract_delegate(it: dict) -> tuple[str, str]:
         for key in ("newDelegate", "delegate", "target", "destination"):
@@ -1069,12 +1180,54 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
                 return val, ""
         return "", ""
 
+    def _register_item(item: dict, *, amount_mutez: int) -> bool:
+        h = str(item.get("hash") or "").strip()
+        signature: tuple[str, str, str, int] = (
+            str(item.get("direction") or ""),
+            str(item.get("entrypoint") or ""),
+            str(item.get("kind") or ""),
+            int(amount_mutez or 0),
+        )
+        if h:
+            bucket = seen_signatures_by_hash.setdefault(h, set())
+            if signature in bucket:
+                stats["drop_seen_duplicate"] += 1
+                return False
+            bucket.add(signature)
+            return True
+
+        fallback_sig: tuple[str, str, str, int, str, str] = (
+            signature[0],
+            signature[1],
+            signature[2],
+            signature[3],
+            str(item.get("ts") or ""),
+            str(item.get("counterparty") or ""),
+        )
+        if fallback_sig in seen_no_hash_signatures:
+            stats["drop_seen_duplicate"] += 1
+            return False
+        seen_no_hash_signatures.add(fallback_sig)
+        return True
+
     for it in tx_items:
+        h = str(it.get("hash") or "").strip()
         sender = _extract_addr(it, "sender", "source")
         target = _extract_addr(it, "target", "destination")
         amount_mutez = int(it.get("amount") or 0)
         params = it.get("parameter") or it.get("parameters") or {}
         entrypoint = params.get("entrypoint") if isinstance(params, dict) else None
+        # Prefer explicit delegation semantics when same operation hash appears
+        # in the delegations endpoint (common for change-baker side effects).
+        if (
+            h
+            and h in deleg_hashes
+            and sender == address
+            and amount_mutez == 0
+            and entrypoint not in ("stake", "unstake")
+        ):
+            stats["drop_tx_pref_deleg"] += 1
+            continue
         metadata = it.get("metadata") or {}
         op_res = metadata.get("operation_result") or {}
         updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
@@ -1108,21 +1261,25 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             "direction": direction,
             "amount_xtz": mutez_to_xtz(amount_mutez),
             "counterparty": counterparty,
-            "hash": it.get("hash") or "",
+            "hash": h,
             "kind": "transaction",
             "entrypoint": entrypoint or "",
+            "_sort_level": _as_int_mutez(it.get("level")),
+            "_sort_id": _as_int_mutez(it.get("id")),
         }
         if direction in ("STK", "UST"):
             item["baker"] = baker_label
-        if item["hash"]:
-            seen_hashes.add(item["hash"])
-        out.append(item)
+        if _register_item(item, amount_mutez=amount_mutez):
+            out.append(item)
 
     for it in stake_items:
         h = it.get("hash") or ""
-        if h in seen_hashes:
-            continue
         amount_mutez = int(it.get("amount") or 0)
+        # Keep non-zero stake ops even if the same hash appears in delegations:
+        # operation groups can contain multiple manager contents sharing one hash.
+        if h in deleg_hashes and amount_mutez == 0:
+            stats["drop_stake_pref_deleg"] += 1
+            continue
         metadata = it.get("metadata") or {}
         op_res = metadata.get("operation_result") or {}
         updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
@@ -1139,16 +1296,19 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             "kind": "transaction",
             "entrypoint": "stake",
             "baker": counterparty,
+            "_sort_level": _as_int_mutez(it.get("level")),
+            "_sort_id": _as_int_mutez(it.get("id")),
         }
-        if h:
-            seen_hashes.add(h)
-        out.append(item)
+        if _register_item(item, amount_mutez=amount_mutez):
+            out.append(item)
 
     for it in unstake_items:
         h = it.get("hash") or ""
-        if h in seen_hashes:
-            continue
         amount_mutez = int(it.get("amount") or 0)
+        # Keep non-zero unstake ops even if hash overlaps delegation rows.
+        if h in deleg_hashes and amount_mutez == 0:
+            stats["drop_unstake_pref_deleg"] += 1
+            continue
         metadata = it.get("metadata") or {}
         op_res = metadata.get("operation_result") or {}
         updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
@@ -1165,15 +1325,56 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             "kind": "transaction",
             "entrypoint": "unstake",
             "baker": counterparty,
+            "_sort_level": _as_int_mutez(it.get("level")),
+            "_sort_id": _as_int_mutez(it.get("id")),
         }
-        if h:
-            seen_hashes.add(h)
-        out.append(item)
+        if _register_item(item, amount_mutez=amount_mutez):
+            out.append(item)
+
+    # Native protocol staking operations (TzKT /operations/staking).
+    # Keep as an additional source because some indexer modes don't expose
+    # stake/unstake consistently under /operations/transactions entrypoints.
+    for it in staking_items:
+        op_kind = _op_type(it)
+        if op_kind not in ("stake", "unstake"):
+            continue
+        h = it.get("hash") or ""
+        amount_mutez = _as_int_mutez(it.get("amount"))
+        # Prefer delegation only when staking-side amount is zero (duplicate/indexer artifact).
+        if h in deleg_hashes and amount_mutez == 0:
+            stats["drop_staking_pref_deleg"] += 1
+            continue
+        metadata = it.get("metadata") or {}
+        op_res = metadata.get("operation_result") or {}
+        updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
+        baker_addr, baker_alias = _extract_delegate(it)
+        if not baker_addr:
+            baker_addr = _delegate_from_updates(updates)
+        if baker_alias:
+            counterparty = baker_alias
+        elif baker_addr:
+            counterparty = _format_baker_label(rpc, baker_addr)
+        else:
+            baker_addr = get_delegation_info(rpc, address) or ""
+            counterparty = _format_baker_label(rpc, baker_addr)
+        direction = "STK" if op_kind == "stake" else "UST"
+        item = {
+            "ts": it.get("timestamp") or "",
+            "direction": direction,
+            "amount_xtz": mutez_to_xtz(amount_mutez),
+            "counterparty": counterparty,
+            "hash": h,
+            "kind": "transaction",
+            "entrypoint": op_kind,
+            "baker": counterparty,
+            "_sort_level": _as_int_mutez(it.get("level")),
+            "_sort_id": _as_int_mutez(it.get("id")),
+        }
+        if _register_item(item, amount_mutez=amount_mutez):
+            out.append(item)
 
     for it in deleg_items:
         h = it.get("hash") or ""
-        if h and h in seen_hashes:
-            continue
         delegate_addr, delegate_alias = _extract_delegate(it)
         direction = "DEL" if delegate_addr else "UND"
         if delegate_alias:
@@ -1183,22 +1384,39 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         else:
             counterparty = "—"
 
-        out.append(
-            {
-                "ts": it.get("timestamp") or "",
-                "direction": direction,
-                "amount_xtz": Decimal(0),
-                "counterparty": counterparty,
-                "hash": h,
-                "kind": "delegation",
-                "entrypoint": "delegation",
-            }
-        )
-        if h:
-            seen_hashes.add(h)
+        item = {
+            "ts": it.get("timestamp") or "",
+            "direction": direction,
+            "amount_xtz": Decimal(0),
+            "counterparty": counterparty,
+            "hash": h,
+            "kind": "delegation",
+            "entrypoint": "delegation",
+            "_sort_level": _as_int_mutez(it.get("level")),
+            "_sort_id": _as_int_mutez(it.get("id")),
+        }
+        if _register_item(item, amount_mutez=0):
+            out.append(item)
 
-    out.sort(key=lambda x: x.get("ts") or "", reverse=True)
+    out.sort(
+        key=lambda x: (
+            x.get("ts") or "",
+            _as_int_mutez(x.get("_sort_level")),
+            _as_int_mutez(x.get("_sort_id")),
+        ),
+        reverse=True,
+    )
+    for it in out:
+        it.pop("_sort_level", None)
+        it.pop("_sort_id", None)
     out = out[:limit]
+    log_debug(
+        "Built wallet history snapshot",
+        address=address,
+        limit=limit,
+        final=len(out),
+        **stats,
+    )
 
     with _tzkt_history_cache_lock:
         _cache_set_bounded(
@@ -1241,6 +1459,7 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
     }
     url = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(params)
 
+    it: Optional[dict[str, Any]] = None
     try:
         req = urllib.request.Request(
             url,
@@ -1248,11 +1467,28 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
             method="GET",
         )
         data = _urlopen_json_with_retries(req, timeout=15, retries=2)
-        if not isinstance(data, list) or not data:
-            data = None
-        it = data[0]
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            it = data[0]
     except _RPC_IO_EXCEPTIONS + _PARSE_EXCEPTIONS + (RuntimeError,):
         it = None
+
+    if it is None:
+        # Fallback: staking endpoint (some indexers expose stake/unstake only here).
+        try:
+            staking_url = (
+                f"{base}/v1/operations/staking?"
+                + urllib.parse.urlencode({"hash": oph, "limit": "1", "withMetadata": "true"})
+            )
+            req = urllib.request.Request(
+                staking_url,
+                headers={"User-Agent": _USER_AGENT},
+                method="GET",
+            )
+            data = _urlopen_json_with_retries(req, timeout=15, retries=2)
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                it = data[0]
+        except _RPC_IO_EXCEPTIONS + _PARSE_EXCEPTIONS + (RuntimeError,):
+            it = None
 
     if it is None:
         # Fallback: generic operations endpoint
@@ -1264,7 +1500,7 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
                 method="GET",
             )
             data = _urlopen_json_with_retries(req, timeout=15, retries=2)
-            if isinstance(data, list) and data:
+            if isinstance(data, list) and data and isinstance(data[0], dict):
                 it = data[0]
             elif isinstance(data, dict):
                 it = data
@@ -1272,20 +1508,23 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
             return None
         if it is None:
             return None
+    if not isinstance(it, dict):
+        return None
 
-    sender = _extract_addr(it, "sender", "source")
-    target = _extract_addr(it, "target", "destination")
+    op_item: dict[str, Any] = it
+    sender = _extract_addr(op_item, "sender", "source")
+    target = _extract_addr(op_item, "target", "destination")
     if sender != address and target != address:
         # Allow delegation-like ops where target isn't set but sender matches.
         if sender != address:
             return None
-    amount_mutez = int(it.get("amount") or 0)
-    params = it.get("parameter") or it.get("parameters") or {}
+    amount_mutez = int(op_item.get("amount") or 0)
+    params = op_item.get("parameter") or op_item.get("parameters") or {}
     entrypoint = params.get("entrypoint") if isinstance(params, dict) else None
-    metadata = it.get("metadata") or {}
+    metadata = op_item.get("metadata") or {}
     op_res = metadata.get("operation_result") or {}
     updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
-    op_type = it.get("type") or it.get("kind") or ""
+    op_type = str(op_item.get("type") or op_item.get("kind") or op_item.get("action") or "").lower()
 
     if sender == address and target == address and entrypoint == "stake":
         direction = "STK"
@@ -1301,9 +1540,18 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
             baker_addr = get_delegation_info(rpc, address) or ""
         counterparty = _format_baker_label(rpc, baker_addr)
         baker_label = counterparty
+    elif op_type in ("stake", "unstake") and sender == address:
+        direction = "STK" if op_type == "stake" else "UST"
+        baker_addr = _extract_addr(op_item, "delegate", "newDelegate", "target", "destination")
+        if not baker_addr:
+            baker_addr = _delegate_from_updates(updates)
+        if not baker_addr:
+            baker_addr = get_delegation_info(rpc, address) or ""
+        counterparty = _format_baker_label(rpc, baker_addr) if baker_addr else "?"
+        baker_label = counterparty
     elif op_type == "delegation" and sender == address:
         direction = "DEL"
-        delegate = _extract_addr(it, "newDelegate", "delegate", "target", "destination")
+        delegate = _extract_addr(op_item, "newDelegate", "delegate", "target", "destination")
         counterparty = _format_baker_label(rpc, delegate) if delegate else "—"
     elif sender == address:
         direction = "OUT"
@@ -1317,14 +1565,18 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
 
     item_kind = "delegation" if op_type == "delegation" else "transaction"
     item = {
-        "ts": it.get("timestamp") or "",
+        "ts": op_item.get("timestamp") or "",
         "direction": direction,
         "amount_xtz": mutez_to_xtz(amount_mutez),
         "counterparty": counterparty,
-        "hash": it.get("hash") or "",
+        "hash": op_item.get("hash") or "",
         "kind": item_kind,
-        "entrypoint": (entrypoint or "delegation") if op_type == "delegation" else (entrypoint or ""),
-        "status": (it.get("status") or "CONFIRMED").upper(),
+        "entrypoint": (
+            entrypoint
+            or ("delegation" if op_type == "delegation" else op_type)
+            or ""
+        ),
+        "status": (op_item.get("status") or "CONFIRMED").upper(),
     }
     if direction in ("STK", "UST"):
         item["baker"] = baker_label
@@ -1346,10 +1598,6 @@ def is_revealed(rpc: str, address: str) -> bool:
     """
     True si la cuenta tz* tiene manager_key revelada.
     """
-    # Defensive: if address is a Key object, extract the address string
-    if hasattr(address, 'public_key_hash'):
-        address = address.public_key_hash()
-
     client = get_client(rpc)
     mk = client.shell.contracts[address].manager_key()
     if mk is None:
@@ -1593,14 +1841,12 @@ def estimate_delegation(rpc: str, from_addr: str, baker_address: str) -> Dict[st
 
     if has_stake_context:
         economy_fee = 6000
-        economy_gas = 25000
         normal_fee = 8000
         normal_gas = 30000
         priority_fee = 12000
         priority_gas = 60000
     else:
         economy_fee = 600
-        economy_gas = 800
         normal_fee = 800   # ~0.0008 XTZ
         normal_gas = 1000  # generous margin over typical ~169 gas
         priority_fee = 1200
@@ -1952,8 +2198,8 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
             f"Cannot delegate: {pending_count} pending operation(s) detected for this wallet. "
             f"Please wait 1-2 minutes for them to confirm, then try again."
         )
-    safe_gas = max(int(gas_limit or 0), 1_040_000)
-    safe_fee = max(int(fee_mutez or 0), 180_000)
+    safe_gas = max(int(gas_limit or 0), _DELEGATION_FALLBACK_SAFE_GAS)
+    safe_fee = _compute_delegate_fallback_fee_mutez(rpc, source_address, fee_mutez)
     safe_storage = max(int(storage_limit or 0), 0)
 
     def _inject_delegate_via_rpc_forge(
@@ -1986,7 +2232,13 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
         if forge_response.status_code != 200:
             raise RuntimeError(f"RPC forge failed (delegation): {forge_response.status_code} - {forge_response.text}")
         rpc_forged_hex = forge_response.text.strip().strip('"')
-        raw_result = sign_and_inject_from_rpc_forge(rpc, key, rpc_forged_hex)
+        try:
+            raw_result = sign_and_inject_from_rpc_forge(rpc, key, rpc_forged_hex)
+        except _OP_RETRY_EXCEPTIONS as raw_err:
+            friendly = _friendly_insufficient_balance_error(raw_err, action="delegation")
+            if friendly:
+                raise RuntimeError(friendly) from raw_err
+            raise
         if isinstance(raw_result, dict):
             return str(raw_result.get("hash", str(raw_result)))
         return str(raw_result)
@@ -2156,6 +2408,9 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
 
             except _OP_RETRY_EXCEPTIONS as e:
                 last_error = e
+                friendly = _friendly_insufficient_balance_error(e, action="delegation")
+                if friendly:
+                    raise RuntimeError(friendly) from e
                 # Check if it's a counter error and we have retries left
                 if _is_counter_sync_error(e) and attempt < max_retries:
                     # Conservative backoff for counter synchronization
@@ -2230,7 +2485,7 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
                     return str(result)
                 except _OP_RETRY_EXCEPTIONS as e:
                     last_error = e
-                    if _is_counter_error(e) and attempt < max_retries:
+                    if _is_counter_sync_error(e) and attempt < max_retries:
                         wait_time = 5.0 * (attempt + 1)
                         log_error(f"Counter error on reveal attempt {attempt + 1}, waiting {wait_time}s", exception=e)
                         time.sleep(wait_time)
@@ -2330,7 +2585,7 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
                     counter_to_use = rpc_counter + 1
                     log_debug(f"[Attempt {attempt + 1}] Will use counter: {counter_to_use}")
                 except _RPC_IO_EXCEPTIONS + (RuntimeError, ValueError, TypeError, AttributeError) as counter_err:
-                    log_error(f"Failed to read counter from RPC", exception=counter_err)
+                    log_error("Failed to read counter from RPC", exception=counter_err)
                     raise
 
                 # Check mempool for pending ops
@@ -2352,14 +2607,14 @@ def stake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int] 
                 log_debug(f"[DEBUG] key.public_key_hash(): {key_pkh}")
                 if source_address != key_pkh:
                     raise RuntimeError(f"KEY MISMATCH! source={source_address} but key.pkh={key_pkh}")
-                log_debug(f"[DEBUG] ✅ Key matches source address")
+                log_debug("[DEBUG] ✅ Key matches source address")
 
                 # Get branch from head block
                 try:
                     branch = client.shell.head.hash()
                     log_debug(f"[Attempt {attempt + 1}] Got branch: {branch}")
                 except _RPC_IO_EXCEPTIONS + (RuntimeError, ValueError, TypeError, AttributeError) as branch_err:
-                    log_error(f"Failed to get branch", exception=branch_err)
+                    log_error("Failed to get branch", exception=branch_err)
                     raise
 
                 def _forge_and_inject(op_contents: dict, *, label: str) -> str:
@@ -2541,7 +2796,7 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
                     counter_to_use = rpc_counter + 1
                     log_debug(f"[Attempt {attempt + 1}] Will use counter: {counter_to_use}")
                 except _RPC_IO_EXCEPTIONS + (RuntimeError, ValueError, TypeError, AttributeError) as counter_err:
-                    log_error(f"Failed to read counter from RPC", exception=counter_err)
+                    log_error("Failed to read counter from RPC", exception=counter_err)
                     raise
 
                 # Check mempool for pending ops
@@ -2560,7 +2815,7 @@ def unstake_xtz(rpc: str, key: Key, amount_xtz: Decimal, fee_mutez: Optional[int
                     branch = client.shell.head.hash()
                     log_debug(f"[Attempt {attempt + 1}] Got branch: {branch}")
                 except _RPC_IO_EXCEPTIONS + (RuntimeError, ValueError, TypeError, AttributeError) as branch_err:
-                    log_error(f"Failed to get branch", exception=branch_err)
+                    log_error("Failed to get branch", exception=branch_err)
                     raise
 
                 def _forge_and_inject(op_contents: dict, *, label: str) -> str:

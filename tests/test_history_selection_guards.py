@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any, cast
 
 from sassy_wallet.ui.app import WalletApp
 
@@ -7,7 +8,7 @@ def test_apply_loaded_history_if_selected_ignores_stale_wallet_result():
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     rendered = []
     loaded_addrs = []
     cleared_addrs = []
@@ -38,7 +39,7 @@ def test_apply_loaded_history_if_selected_updates_current_wallet():
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     rendered = []
     loaded_addrs = []
     cleared_addrs = []
@@ -69,7 +70,7 @@ def test_apply_history_load_error_if_selected_ignores_stale_wallet_error():
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     rendered = []
     cleared_addrs = []
     status_msgs = []

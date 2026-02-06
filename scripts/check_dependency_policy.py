@@ -11,7 +11,7 @@ from typing import Iterable
 try:
     import tomllib  # type: ignore[attr-defined]
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    tomllib = None  # type: ignore[assignment]
+    tomllib = None
 
 
 PIN_RE = re.compile(

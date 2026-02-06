@@ -70,3 +70,11 @@ target-version = "py310"
 markers = [
     "smoke_pilot: interactive Textual Pilot smoke test (optional)",
 ]
+
+[tool.ty.analysis]
+allowed-unresolved-imports = ["pytest", "setuptools"]
+
+[dependency-groups]
+dev = [
+    "ty>=0.0.15",
+]

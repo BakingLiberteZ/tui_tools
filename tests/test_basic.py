@@ -1,6 +1,5 @@
 """Basic tests for Sassy Wallet."""
 
-import pytest
 from sassy_wallet import __version__
 
 

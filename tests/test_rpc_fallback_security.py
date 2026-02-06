@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from sassy_wallet.ui.app import WalletApp
@@ -19,7 +21,7 @@ def test_with_rpc_fallback_retries_once_on_stale_branch_error() -> None:
         return "ok"
 
     rpc_used, payload = WalletApp._with_rpc_fallback(
-        Dummy(),
+        cast(Any, Dummy()),
         action="send",
         rpc="https://rpc.old",
         fn=_fn,
@@ -43,7 +45,7 @@ def test_with_rpc_fallback_does_not_retry_when_selected_rpc_is_unchanged() -> No
 
     with pytest.raises(RuntimeError, match="too old"):
         WalletApp._with_rpc_fallback(
-            Dummy(),
+            cast(Any, Dummy()),
             action="send",
             rpc="https://rpc.old",
             fn=_fn,
@@ -65,7 +67,7 @@ def test_with_rpc_fallback_does_not_trigger_on_non_stale_errors() -> None:
 
     with pytest.raises(RuntimeError, match="permission denied"):
         WalletApp._with_rpc_fallback(
-            Dummy(),
+            cast(Any, Dummy()),
             action="send",
             rpc="https://rpc.old",
             fn=_fn,

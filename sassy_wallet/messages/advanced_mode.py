@@ -72,6 +72,6 @@ if __name__ == "__main__":
         print(f"  {i+1}. {get_advanced_mode_message()}")
         print()
 
-    print(f"\n📊 Statistics:")
+    print("\n📊 Statistics:")
     print(f"  Total messages: {len(ADVANCED_MODE_MESSAGES)}")
-    print(f"\n💡 Tip: All messages discourage using Advanced mode!")
+    print("\n💡 Tip: All messages discourage using Advanced mode!")

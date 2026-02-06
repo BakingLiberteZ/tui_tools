@@ -1,10 +1,14 @@
 import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any, cast
 
 import sassy_wallet.ui.app as app_mod
+from sassy_wallet.core.crypto import EncryptedBlob
 from sassy_wallet.core.store import Account
 from sassy_wallet.ui.app import StakeScreen
+
+_DUMMY_BLOB = EncryptedBlob(salt_b64="", nonce_b64="", ct_b64="")
 
 
 def test_stake_flow_double_attempt_keeps_context_and_blocks_race():
@@ -20,6 +24,7 @@ def test_stake_flow_double_attempt_keeps_context_and_blocks_race():
         enc=None,
     )
     screen = StakeScreen(accounts=[account], rpc="https://rpc.tzkt.io/mainnet")
+    screen_any = cast(Any, screen)
     screen.selected_account = account
     screen.balance_xtz = Decimal("10")
     screen.is_delegated = True
@@ -50,13 +55,13 @@ def test_stake_flow_double_attempt_keeps_context_and_blocks_race():
     def _show_error(message: str):
         shown_errors.append(message)
 
-    screen._refresh_selected_chain_state = _refresh_selected_chain_state
-    screen._has_outgoing_activity = lambda address: True
-    screen._read_validated_amount = lambda **kwargs: Decimal("1")
-    screen._confirm_pending_ops_or_abort = _confirm_pending_ops_or_abort
-    screen._confirm_stake_flow = _confirm_stake_flow
-    screen._dismiss_stake_action = _dismiss_stake_action
-    screen._show_error = _show_error
+    screen_any._refresh_selected_chain_state = _refresh_selected_chain_state
+    screen_any._has_outgoing_activity = lambda address: True
+    screen_any._read_validated_amount = lambda **kwargs: Decimal("1")
+    screen_any._confirm_pending_ops_or_abort = _confirm_pending_ops_or_abort
+    screen_any._confirm_stake_flow = _confirm_stake_flow
+    screen_any._dismiss_stake_action = _dismiss_stake_action
+    screen_any._show_error = _show_error
 
     async def _run() -> None:
         await screen.stake_pressed()
@@ -86,6 +91,7 @@ def test_stake_flow_ignores_overlapping_submit_attempts():
         enc=None,
     )
     screen = StakeScreen(accounts=[account], rpc="https://rpc.tzkt.io/mainnet")
+    screen_any = cast(Any, screen)
     screen.selected_account = account
     screen.balance_xtz = Decimal("10")
     screen.is_delegated = True
@@ -109,12 +115,12 @@ def test_stake_flow_ignores_overlapping_submit_attempts():
         payload = {"action": action, **kwargs}
         dismissed_payloads.append(payload)
 
-    screen._refresh_selected_chain_state = _refresh_selected_chain_state
-    screen._has_outgoing_activity = lambda address: True
-    screen._read_validated_amount = lambda **kwargs: Decimal("1")
-    screen._confirm_pending_ops_or_abort = _confirm_pending_ops_or_abort
-    screen._confirm_stake_flow = _confirm_stake_flow
-    screen._dismiss_stake_action = _dismiss_stake_action
+    screen_any._refresh_selected_chain_state = _refresh_selected_chain_state
+    screen_any._has_outgoing_activity = lambda address: True
+    screen_any._read_validated_amount = lambda **kwargs: Decimal("1")
+    screen_any._confirm_pending_ops_or_abort = _confirm_pending_ops_or_abort
+    screen_any._confirm_stake_flow = _confirm_stake_flow
+    screen_any._dismiss_stake_action = _dismiss_stake_action
 
     async def _run() -> None:
         t1 = asyncio.create_task(screen.stake_pressed())
@@ -139,6 +145,7 @@ def test_stake_flow_blocks_when_pending_unstake_exists_after_baker_change():
         enc=None,
     )
     screen = StakeScreen(accounts=[account], rpc="https://rpc.tzkt.io/mainnet")
+    screen_any = cast(Any, screen)
     screen.selected_account = account
     screen.balance_xtz = Decimal("10")
     screen.is_delegated = True
@@ -161,13 +168,13 @@ def test_stake_flow_blocks_when_pending_unstake_exists_after_baker_change():
     def _show_error(message: str):
         shown_errors.append(message)
 
-    screen._refresh_selected_chain_state = _refresh_selected_chain_state
-    screen._has_outgoing_activity = lambda address: True
-    screen._read_validated_amount = lambda **kwargs: Decimal("1")
-    screen._confirm_pending_ops_or_abort = _confirm_pending_ops_or_abort
-    screen._confirm_stake_flow = _confirm_stake_flow
-    screen._dismiss_stake_action = lambda *args, **kwargs: None
-    screen._show_error = _show_error
+    screen_any._refresh_selected_chain_state = _refresh_selected_chain_state
+    screen_any._has_outgoing_activity = lambda address: True
+    screen_any._read_validated_amount = lambda **kwargs: Decimal("1")
+    screen_any._confirm_pending_ops_or_abort = _confirm_pending_ops_or_abort
+    screen_any._confirm_stake_flow = _confirm_stake_flow
+    screen_any._dismiss_stake_action = lambda *args, **kwargs: None
+    screen_any._show_error = _show_error
 
     asyncio.run(screen.stake_pressed())
 
@@ -181,7 +188,7 @@ def test_action_stake_runs_in_dedicated_worker_group():
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app._stake_flow_in_progress = False
     app._breathing_active = False
     app._tx_watchdog_token = None
@@ -211,13 +218,13 @@ def test_open_stake_flow_anchors_source_wallet_before_dispatch(monkeypatch):
     account = Account(
         name="Source",
         address="tz1SOURCE11111111111111111111111111111",
-        enc=object(),
+        enc=_DUMMY_BLOB,
     )
 
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app.accounts = [account]
     app.rpc = "https://rpc.tzkt.io/mainnet"
     app._stake_wallet_info_cache = {}
@@ -250,13 +257,13 @@ def test_open_stake_flow_does_not_abort_when_focus_anchor_fails(monkeypatch):
     account = Account(
         name="Source",
         address="tz1SOURCE11111111111111111111111111111",
-        enc=object(),
+        enc=_DUMMY_BLOB,
     )
 
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app.accounts = [account]
     app.rpc = "https://rpc.tzkt.io/mainnet"
     app._stake_wallet_info_cache = {}
@@ -293,7 +300,7 @@ def test_handle_stake_action_executes_injection_after_focus(monkeypatch):
     account = Account(
         name="Source",
         address="tz1SOURCE11111111111111111111111111111",
-        enc=object(),
+        enc=_DUMMY_BLOB,
     )
 
     class DummyKey:
@@ -303,7 +310,7 @@ def test_handle_stake_action_executes_injection_after_focus(monkeypatch):
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app.rpc = "https://rpc.tzkt.io/mainnet"
     app._tx_watchdog_token = None
     app._status_lock_until_refresh = False

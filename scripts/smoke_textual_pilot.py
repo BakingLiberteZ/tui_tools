@@ -20,13 +20,14 @@ import time
 from collections import deque
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import sassy_wallet.ui.app as app_mod
-from sassy_wallet.core.store import Account
+import sassy_wallet.ui.app as app_mod  # noqa: E402
+from sassy_wallet.core.store import Account  # noqa: E402
 
 
 class SmokeFailure(RuntimeError):
@@ -58,11 +59,13 @@ def _status_text(app: app_mod.WalletApp) -> str:
 
 
 async def _run_once() -> None:
-    source = Account(name="Smoke Source", address="tz1SMOKESOURCE11111111111111111111111", enc=object())
-    other = Account(name="Smoke Other", address="tz1SMOKEOTHER22222222222222222222222", enc=object())
+    source = Account(name="Smoke Source", address="tz1SMOKESOURCE11111111111111111111111", enc=None)
+    other = Account(name="Smoke Other", address="tz1SMOKEOTHER22222222222222222222222", enc=None)
     key = FakeKey(source.address)
 
     app = app_mod.WalletApp()
+    app_any = cast(Any, app)
+    app_mod_any = cast(Any, app_mod)
     app.accounts = [source, other]
     app.selected = source
     app._last_selected_addr = None
@@ -72,11 +75,11 @@ async def _run_once() -> None:
     app._auto_refresh_enabled = False
 
     # Disable unrelated background activity.
-    app._autodetect_rpc = lambda: None
-    app._start_auto_refresh = lambda: None
-    app._start_price_indicator = lambda: None
-    app._start_rpc_pulse = lambda: None
-    app._request_price_refresh = lambda *args, **kwargs: None
+    app_any._autodetect_rpc = lambda: None
+    app_any._start_auto_refresh = lambda: None
+    app_any._start_price_indicator = lambda: None
+    app_any._start_rpc_pulse = lambda: None
+    app_any._request_price_refresh = lambda *args, **kwargs: None
 
     # Render account list from fixture (avoid store reload during on_mount).
     def _render_accounts_fixture() -> None:
@@ -93,15 +96,15 @@ async def _run_once() -> None:
             lv.append(app_mod.ListItem(row))
         lv.focus()
 
-    app._render_accounts = _render_accounts_fixture
+    app_any._render_accounts = _render_accounts_fixture
 
     # Deterministic operation timing.
-    app._tx_flow_remaining_or_default = lambda *_args, **_kwargs: 0.10
-    app._resolve_baked_by_label = lambda *_args, **_kwargs: "Smoke Baker"
-    app._resolve_delegate_for_pending = lambda *_args, **_kwargs: None
-    app._refresh_account_status_only = lambda *_args, **_kwargs: None
-    app._silent_refresh_history_for = lambda *_args, **_kwargs: None
-    app._ensure_working_rpc = lambda: (True, True, None)
+    app_any._tx_flow_remaining_or_default = lambda *_args, **_kwargs: 0.10
+    app_any._resolve_baked_by_label = lambda *_args, **_kwargs: "Smoke Baker"
+    app_any._resolve_delegate_for_pending = lambda *_args, **_kwargs: None
+    app_any._refresh_account_status_only = lambda *_args, **_kwargs: None
+    app_any._silent_refresh_history_for = lambda *_args, **_kwargs: None
+    app_any._ensure_working_rpc = lambda: ("https://rpc.tzkt.io/mainnet", True, True)
 
     # Keep worker execution local/synchronous in smoke to avoid teardown hangs.
     def _run_worker_sync(fn, **_kwargs):
@@ -113,16 +116,16 @@ async def _run_once() -> None:
             pass
         return None
 
-    app.run_worker = _run_worker_sync
-    app._verify_pending_op = lambda *_args, **_kwargs: None
+    app_any.run_worker = _run_worker_sync
+    app_any._verify_pending_op = lambda *_args, **_kwargs: None
 
     # Offline deterministic stubs.
-    app_mod.get_balance_mutez = lambda *_args, **_kwargs: 10_000_000_000
-    app_mod.get_staking_balance = lambda *_args, **_kwargs: 5_000_000_000
-    app_mod.is_revealed = lambda *_args, **_kwargs: True
-    app_mod.get_xtz_history = lambda *_args, **_kwargs: []
-    app_mod.resolve_tx_by_hash = lambda *_args, **_kwargs: True
-    app_mod.get_wallet_chain_state = lambda *_args, **_kwargs: {
+    app_mod_any.get_balance_mutez = lambda *_args, **_kwargs: 10_000_000_000
+    app_mod_any.get_staking_balance = lambda *_args, **_kwargs: 5_000_000_000
+    app_mod_any.is_revealed = lambda *_args, **_kwargs: True
+    app_mod_any.get_xtz_history = lambda *_args, **_kwargs: []
+    app_mod_any.resolve_tx_by_hash = lambda *_args, **_kwargs: None
+    app_mod_any.get_wallet_chain_state = lambda *_args, **_kwargs: {
         "delegate": "tz1SMOKEBAKER33333333333333333333333",
         "staked_mutez": 5_000_000,
         "staking_active": True,
@@ -138,7 +141,7 @@ async def _run_once() -> None:
         op_hashes.append(oph)
         return rpc, oph
 
-    app._with_rpc_fallback = _with_rpc_fallback
+    app_any._with_rpc_fallback = _with_rpc_fallback
 
     busy_events: list[bool] = []
     original_set_busy = app._set_busy
@@ -147,7 +150,7 @@ async def _run_once() -> None:
         busy_events.append(busy)
         original_set_busy(busy)
 
-    app._set_busy = _set_busy_trace
+    app_any._set_busy = _set_busy_trace
 
     stake_payloads = deque(
         [
@@ -211,7 +214,7 @@ async def _run_once() -> None:
             return stake_payloads.popleft() if stake_payloads else None
         raise SmokeFailure(f"Unexpected modal in smoke flow: {name}")
 
-    app.push_screen_wait = _fake_push_screen_wait
+    app_any.push_screen_wait = _fake_push_screen_wait
 
     failure: str | None = None
     async with app.run_test(size=(160, 48)) as pilot:

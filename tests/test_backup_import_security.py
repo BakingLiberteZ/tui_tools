@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -30,7 +31,7 @@ def test_load_backup_file_rejects_oversized_payload(tmp_path: Path, monkeypatch:
     backup_path.write_text(json.dumps({"blob": "x" * 512}), encoding="utf-8")
 
     dummy = _WizardDummy()
-    loaded = ImportWizardScreen._load_backup_file(dummy, backup_path)
+    loaded = ImportWizardScreen._load_backup_file(cast(Any, dummy), backup_path)
 
     assert loaded is None
     assert "too large" in dummy.error.lower()
@@ -93,7 +94,7 @@ def test_import_backup_payload_skips_malformed_entries_and_sanitizes_recents(
         },
     }
 
-    result = asyncio.run(WalletApp._import_from_backup_payload(dummy, payload))
+    result = asyncio.run(WalletApp._import_from_backup_payload(cast(Any, dummy), payload))
 
     assert result is False
     assert len(dummy.store["accounts"]) == 1
@@ -114,7 +115,7 @@ def test_import_backup_payload_rejects_when_all_entries_are_invalid(
         "accounts": ["broken-entry", {"name": "X", "address": "tz1bad", "enc": None}],
     }
 
-    result = asyncio.run(WalletApp._import_from_backup_payload(dummy, payload))
+    result = asyncio.run(WalletApp._import_from_backup_payload(cast(Any, dummy), payload))
 
     assert result is False
     assert any("no valid wallet entries" in msg.lower() for msg in dummy.status_messages)
@@ -135,7 +136,7 @@ def test_import_backup_payload_rejects_excessive_account_count(
         ],
     }
 
-    result = asyncio.run(WalletApp._import_from_backup_payload(dummy, payload))
+    result = asyncio.run(WalletApp._import_from_backup_payload(cast(Any, dummy), payload))
 
     assert result is False
     assert any("too many wallets" in msg.lower() for msg in dummy.status_messages)

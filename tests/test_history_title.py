@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any, cast
 
 from sassy_wallet.ui.app import WalletApp
 
@@ -7,7 +8,7 @@ def test_history_title_includes_selected_wallet_name():
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app.history_limit = 10
     app.selected = SimpleNamespace(name="Main Wallet")
 
@@ -21,7 +22,7 @@ def test_history_title_escapes_markup_chars_in_wallet_name():
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app.history_limit = 10
     app.selected = SimpleNamespace(name="A[1] Wallet")
 
@@ -33,7 +34,7 @@ def test_history_title_shows_no_wallet_selected_when_none():
     class Dummy:
         pass
 
-    app = Dummy()
+    app = cast(Any, Dummy())
     app.history_limit = 10
     app.selected = None
 

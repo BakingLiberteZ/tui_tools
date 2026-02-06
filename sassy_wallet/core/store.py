@@ -294,7 +294,7 @@ def get_tx_prefs(data: Dict[str, Any]) -> TxPrefs:
         tp = _default_store()["tx_prefs"].copy()
         data["tx_prefs"] = tp
     # type narrowing
-    return tp  # type: ignore[return-value]
+    return tp
 
 
 def set_tx_prefs(

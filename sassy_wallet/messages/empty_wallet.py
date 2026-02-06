@@ -82,6 +82,6 @@ if __name__ == "__main__":
         print(f"  {i+1}. {get_empty_wallet_message()}")
         print()
 
-    print(f"\n📊 Statistics:")
+    print("\n📊 Statistics:")
     print(f"  Total messages: {len(EMPTY_WALLET_MESSAGES)}")
-    print(f"\n💡 Tip: All messages encourage pressing 'i' to import a wallet!")
+    print("\n💡 Tip: All messages encourage pressing 'i' to import a wallet!")

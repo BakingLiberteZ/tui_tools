@@ -63,7 +63,7 @@
 - `python-app.yml`:
 - Lock-first flow (`uv lock`, `uv sync --dev --frozen`).
 - Dependency policy gate added.
-- Quality gates: `ruff`, `ty`, tests.
+- Quality gates: `ruff`, `ty` (full `ty check` scope), tests.
 
 - `security-audit.yml`:
 - Dedicated security job with lock-first flow.
@@ -95,10 +95,55 @@
 
 ## Current Validation Baseline
 
-- `pytest -q`: passing (`53 passed, 1 skipped` in latest run).
+- `uv run ruff check .`: passing.
+- `pytest -q`: passing (`78 passed, 1 skipped` in latest run).
 - `bandit -r sassy_wallet -ll -ii`: clean.
 - `scripts/check_dependency_policy.py`: passing.
-- `pip-audit` full online query depends on network availability; enforced in CI `security-audit.yml`.
+- `pip-audit -l`: reports only `ecdsa==0.19.1` (`CVE-2024-23342`) pending upstream fix.
+- `ty` installed (`0.0.15`) and active.
+- `ty check sassy_wallet`: **All checks passed**.
+- `ty check` full repo: **All checks passed** after test harness typing cleanup and ty analysis config updates.
+
+## Type-Checking Hardening (2026-02-06)
+
+- Closed remaining `ty` errors in message modules:
+- `sassy_wallet/messages/bakery.py`
+- `sassy_wallet/messages/staking.py`
+- Removed stale `type: ignore` suppressions and tightened signatures:
+- `sassy_wallet/core/logger.py`
+- `sassy_wallet/core/store.py`
+- Hardened UI typing/null-safety in high-risk flows:
+- explicit `WalletApp` casts for threaded UI callbacks (`_ui`) in estimate/load/delegate/stake/unstake/send flows.
+- captured `selected_account`/`selected_name` before async modal factories to avoid optional-attribute races.
+- removed redundant `type: ignore[attr-defined]` from `push_screen_wait` call sites.
+- Additional debt reduction outside prod module scope:
+- `scripts/smoke_textual_pilot.py` now uses explicit `Any` casts for intentional monkeypatching and valid fixture account types (`enc=None`), bringing that script to `ty`-clean.
+- `scripts/check_dependency_policy.py` cleanup removed stale unused type-ignore on `tomllib` fallback assignment.
+- Test harness typing cleanup:
+- `tests/test_ui_pending_history_scope.py`
+- `tests/test_stake_flow_integration.py`
+- `tests/test_history_selection_guards.py`
+- `tests/test_history_title.py`
+- `tests/test_backup_import_security.py`
+- `tests/test_rpc_fallback_security.py`
+- `tests/test_delegate_fill_params.py`
+- `tests/test_send_overrides.py`
+- `tests/test_stake_selector_layout.py`
+- `tests/test_stake_status_infer.py`
+- Added `ty` analysis allowance for environment/tooling imports in `pyproject.toml` (`pytest`, `setuptools`) to avoid false negatives from runner-specific module discovery.
+
+## History Reliability Hardening (2026-02-06)
+
+- Deep review focused on disappearing/misclassified rows after rapid `stake` + `change_baker` sequences.
+- `get_xtz_history` now uses semantic dedupe (same hash + same semantic signature) instead of dropping everything by hash.
+- Shared-hash delegation preference is now limited to likely duplicate artifacts (zero-amount staking rows), so non-zero `stake/unstake` rows are preserved.
+- Added and updated regression tests for:
+- shared-hash delegation/staking precedence
+- preserving non-zero staking rows on shared hashes
+- pending merge + shadow behavior
+- hash-resolution fallback to staking endpoint
+- Added runtime debug export for field QA:
+- `Ctrl+D` in app exports `logs/history_debug_*.json` with visible history, cache, pending ops, overrides, and live pull.
 
 ## Stake Flow Reliability Notes (2026-02-06)
 
@@ -126,12 +171,15 @@
 
 - Added guided checklist for interactive validation:
 - `QA_CHANGE_BAKER.md`
+- `QA_HISTORY_RELIABILITY.md`
 - Covers:
 - change baker with/without active stake
 - immediate post-change stake lock expectations
 - same-baker no-op guard
 - cancel/back safety
 - copy consistency checks in encryption password modals
+- history row retention across mixed `change_baker`/`stake`/`unstake`/`send` sequences
+- debug capture path with `Ctrl+D` snapshot export
 
 ## Copy Consistency (Encryption Password)
 

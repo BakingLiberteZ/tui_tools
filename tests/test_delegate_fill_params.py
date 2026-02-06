@@ -1,5 +1,7 @@
 """Tests for delegation fill behavior with partial overrides."""
 
+from typing import Any, cast
+
 from sassy_wallet.core import tezos
 
 
@@ -54,7 +56,7 @@ def test_delegate_to_baker_fill_includes_autofilled_limits(monkeypatch):
         def public_key_hash(self):
             return "tz1SRC"
 
-    oph = tezos.delegate_to_baker("https://rpc.example", _Key(), "tz1NEW", fee_mutez=500)
+    oph = tezos.delegate_to_baker("https://rpc.example", cast(Any, _Key()), "tz1NEW", fee_mutez=500)
     assert oph == "op_hash"
 
     fill_calls = [c for c in recorder if c[0] == "fill"]
@@ -140,7 +142,7 @@ class _AlwaysGasExhaustedClient:
         return _AlwaysGasExhaustedOp(self.recorder)
 
 
-def test_delegate_to_baker_gas_exhausted_retries_with_high_safety_limits(monkeypatch):
+def test_delegate_to_baker_gas_exhausted_retries_with_safe_limits(monkeypatch):
     recorder = []
 
     def _fake_using(*, shell, key):
@@ -156,7 +158,7 @@ def test_delegate_to_baker_gas_exhausted_retries_with_high_safety_limits(monkeyp
 
     oph = tezos.delegate_to_baker(
         "https://rpc.example",
-        _Key(),
+        cast(Any, _Key()),
         "tz1NEW",
         fee_mutez=500,
         gas_limit=1000,
@@ -166,17 +168,18 @@ def test_delegate_to_baker_gas_exhausted_retries_with_high_safety_limits(monkeyp
 
     fill_calls = [c[1] for c in recorder if c[0] == "fill"]
     assert fill_calls
-    assert any(c.get("fee") == 180000 for c in fill_calls)
+    assert any(c.get("fee") == 8000 for c in fill_calls)
     assert any(c.get("gas_limit") == 1040000 for c in fill_calls)
 
     inject_calls = [c[1] for c in recorder if c[0] == "inject"]
     assert inject_calls
     assert inject_calls[-1].get("gas_limit") == 1040000
-    assert inject_calls[-1].get("fee") == 180000
+    assert inject_calls[-1].get("fee") == 8000
 
 
 def test_delegate_to_baker_gas_exhausted_falls_back_to_rpc_forge(monkeypatch):
     recorder = []
+    posted_payload = {}
 
     def _fake_using(*, shell, key):
         return _AlwaysGasExhaustedClient(recorder)
@@ -201,7 +204,11 @@ def test_delegate_to_baker_gas_exhausted_falls_back_to_rpc_forge(monkeypatch):
     monkeypatch.setattr(tezos, "is_wallet_revealed", lambda rpc, addr: True)
     monkeypatch.setattr(tezos, "get_client", lambda rpc, key=None: _FakeClient())
     monkeypatch.setattr(tezos, "get_counter", lambda rpc, addr: 42)
-    monkeypatch.setattr(tezos.requests, "post", lambda *args, **kwargs: _FakeResponse())
+    def _fake_post(*args, **kwargs):
+        posted_payload["payload"] = kwargs.get("json") or {}
+        return _FakeResponse()
+
+    monkeypatch.setattr(tezos.requests, "post", _fake_post)
     monkeypatch.setattr(tezos, "sign_and_inject_from_rpc_forge", lambda rpc, key, forged: "op_forged")
 
     class _Key:
@@ -210,13 +217,16 @@ def test_delegate_to_baker_gas_exhausted_falls_back_to_rpc_forge(monkeypatch):
 
     oph = tezos.delegate_to_baker(
         "https://rpc.example",
-        _Key(),
+        cast(Any, _Key()),
         "tz1NEW",
         fee_mutez=500,
         gas_limit=1000,
         storage_limit=0,
     )
     assert oph == "op_forged"
+    contents = posted_payload["payload"]["contents"][0]
+    assert contents["fee"] == "8000"
+    assert contents["gas_limit"] == "1040000"
 
 
 class _AutofillGasExhaustedOp:
@@ -273,13 +283,66 @@ def test_delegate_to_baker_gas_exhausted_on_autofill_falls_back_to_rpc_forge(mon
 
     oph = tezos.delegate_to_baker(
         "https://rpc.example",
-        _Key(),
+        cast(Any, _Key()),
         "tz1NEW",
         fee_mutez=500,
         gas_limit=1000,
         storage_limit=0,
     )
     assert oph == "op_forged_autofill"
+
+
+def test_delegate_to_baker_forge_fallback_caps_fee_to_spendable_balance(monkeypatch):
+    recorder = []
+    posted_payload = {}
+
+    def _fake_using(*, shell, key):
+        return _AutofillGasExhaustedClient(recorder)
+
+    class _FakeHead:
+        @staticmethod
+        def hash():
+            return "BLfakebranch"
+
+    class _FakeShell:
+        head = _FakeHead()
+
+    class _FakeClient:
+        shell = _FakeShell()
+
+    class _FakeResponse:
+        status_code = 200
+        text = '"deadbeef"'
+
+    def _fake_post(*args, **kwargs):
+        posted_payload["payload"] = kwargs.get("json") or {}
+        return _FakeResponse()
+
+    monkeypatch.setattr(tezos, "pytezos", type("P", (), {"using": staticmethod(_fake_using)}))
+    monkeypatch.setattr(tezos, "check_pending_operations", lambda rpc, addr: None)
+    monkeypatch.setattr(tezos, "is_wallet_revealed", lambda rpc, addr: True)
+    monkeypatch.setattr(tezos, "get_client", lambda rpc, key=None: _FakeClient())
+    monkeypatch.setattr(tezos, "get_counter", lambda rpc, addr: 42)
+    monkeypatch.setattr(tezos, "get_balance_mutez", lambda rpc, addr: 7000)
+    monkeypatch.setattr(tezos.requests, "post", _fake_post)
+    monkeypatch.setattr(tezos, "sign_and_inject_from_rpc_forge", lambda rpc, key, forged: "op_capped")
+
+    class _Key:
+        def public_key_hash(self):
+            return "tz1SRC"
+
+    oph = tezos.delegate_to_baker(
+        "https://rpc.example",
+        cast(Any, _Key()),
+        "tz1NEW",
+        fee_mutez=500,
+        gas_limit=1000,
+        storage_limit=0,
+    )
+    assert oph == "op_capped"
+    contents = posted_payload["payload"]["contents"][0]
+    assert contents["fee"] == "6500"
+    assert contents["gas_limit"] == "1040000"
 
 
 def test_estimate_delegation_uses_high_profile_when_stake_context_detected(monkeypatch):

@@ -1,6 +1,7 @@
 """Tests for send flow override behavior."""
 
 from decimal import Decimal
+from typing import Any, cast
 
 from sassy_wallet.core import tezos
 
@@ -57,7 +58,7 @@ def test_send_xtz_ignores_overrides_for_reveal(monkeypatch):
 
     result = tezos.send_xtz(
         "https://rpc.example",
-        object(),
+        cast(Any, object()),
         "tz1fakeaddressxxxxxxxxxxxxxxxxxxxxxxx",
         Decimal("1.0"),
         fee_mutez=1234,
