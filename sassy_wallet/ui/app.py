@@ -10068,6 +10068,12 @@ class WalletApp(App):
         self._last_status = text
         if style != "error" and self._is_error_status(text):
             style = "error"
+        if style == "error":
+            # Errors should never keep a lingering breathing/pulse visual from a prior flow.
+            self._status_lock_until_refresh = False
+            if self._breathing_active:
+                self._stop_breathing_effect()
+            self._set_busy(False)
 
         try:
             status_widget = self.query_one("#status_line", Static)
@@ -13195,6 +13201,23 @@ class WalletApp(App):
         if current_baker_address and current_baker_address == new_baker_address:
             self._set_status("ℹ️ Already delegated to that baker.")
             return True
+
+        # Empirically on current protocol/RPC paths this operation repeatedly fails with
+        # gas_exhausted when there is active stake. Short-circuit early with clear guidance
+        # instead of making the user wait through long multi-RPC retries.
+        if pre_change_staked_mutez > 0:
+            staked_xtz = format_xtz(mutez_to_xtz(pre_change_staked_mutez))
+            self._status_lock_until_refresh = False
+            self._stop_breathing_effect()
+            self._set_busy(False)
+            self._set_status_styled(
+                f"❌ Cannot change baker while {staked_xtz} XTZ is actively staked. "
+                "Unstake first, wait inclusion, then change baker.",
+                style="error",
+                duration=8.0,
+                force=True,
+            )
+            return False
 
         key = stake_data.get("key")
         fee_mutez = stake_data.get("fee_mutez")
