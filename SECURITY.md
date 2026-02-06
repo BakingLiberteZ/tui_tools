@@ -55,3 +55,4 @@ CI enforces:
 
 - `CVE-2024-23342` (`ecdsa==0.19.1`) is currently ignored in `pip-audit` gates because no fixed release is available.
 - This package is pulled transitively by `bip_utils`; remove the exception as soon as an upstream fixed chain is available.
+- Follow-up tracking record: `SECURITY_FOLLOWUPS.md` (`SF-2026-02-06-001`).

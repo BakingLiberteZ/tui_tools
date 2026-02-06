@@ -13,6 +13,7 @@ permissions:
   contents: read
 
 env:
+  # TODO(SF-2026-02-06-001): remove this ignore once upstream `ecdsa` CVE fix is available.
   PIP_AUDIT_IGNORES: "--ignore-vuln CVE-2024-23342"
 
 jobs:

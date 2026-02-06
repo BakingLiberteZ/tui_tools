@@ -56,6 +56,7 @@
 - Additional CVE response:
 - `urllib3` further upgraded to `2.6.3` after local `pip-audit` reported `CVE-2026-21441` affecting `2.6.0`.
 - `ecdsa` (`CVE-2024-23342`) currently has no fixed version in resolver output; exception is explicitly tracked and temporarily ignored in CI `pip-audit` gates.
+- Follow-up issue record for removing the temporary ignore: `SECURITY_FOLLOWUPS.md` (`SF-2026-02-06-001`).
 
 ## CI/CD Hardening Implemented
 
