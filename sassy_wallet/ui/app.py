@@ -5069,6 +5069,28 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 yield Button("Unstake", id="unstake_btn", variant="warning", classes="hidden")
                 yield Button("Cancel", id="cancel")
 
+    def _stake_selector_delegation_tag(self, delegate_addr: Optional[str]) -> str:
+        if delegate_addr:
+            return "[yellow]Delegated[/yellow]"
+        return "[red]Not Delegated[/red]"
+
+    def _format_stake_selector_row(
+        self,
+        *,
+        account_name: str,
+        address: str,
+        balance_mutez: int,
+        staked_mutez: int,
+        delegate_addr: Optional[str],
+    ) -> str:
+        addr_short = address[:10] + "…" + address[-8:]
+        balance_xtz = mutez_to_xtz(max(0, int(balance_mutez or 0)))
+        staked_xtz = mutez_to_xtz(max(0, int(staked_mutez or 0)))
+        balance_tag = f"[#34d399]{format_xtz(balance_xtz)} ꜩ[/#34d399]"
+        staked_tag = f"[#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
+        delegation_tag = self._stake_selector_delegation_tag(delegate_addr)
+        return f"[b]{account_name}[/b] {balance_tag} {staked_tag}\n[dim]{addr_short}[/dim] {delegation_tag}"
+
     def on_mount(self) -> None:
         """Populate wallet selector with delegation/staking status."""
         lv = self.query_one("#wallet_selector", ListView)
@@ -5083,33 +5105,17 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 addr_short = acc.address[:10] + "…" + acc.address[-8:]
                 cached_info = self._wallet_info_cache.get(acc.address)
                 if cached_info:
-                    staked_mutez = cached_info.get("staked_mutez", 0)
-                    staking_active = bool(cached_info.get("staking_active"))
                     delegate_addr = cached_info.get("delegate_addr")
                     balance_mutez = cached_info.get("balance_mutez", 0)
-                    balance_xtz = mutez_to_xtz(balance_mutez)
-                    balance_tag = f"[#34d399]{format_xtz(balance_xtz)} ꜩ[/#34d399]"
-                    if staked_mutez > 0:
-                        staked_xtz = mutez_to_xtz(staked_mutez)
-                        if delegate_addr:
-                            status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
-                        else:
-                            status_line = f"{balance_tag} [#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
-                    elif staking_active:
-                        if delegate_addr:
-                            status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]0 Staked[/#8b5cf6]"
-                        else:
-                            status_line = f"{balance_tag} [#8b5cf6]0 Staked[/#8b5cf6]"
-                    elif delegate_addr:
-                        status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]0 Staked[/#8b5cf6]"
-                    else:
-                        if balance_mutez <= 0:
-                            status_line = f"{balance_tag} [#f97316]NEW WALLET[/#f97316]"
-                        else:
-                            status_line = f"{balance_tag} [red]NOT DELEGATED[/red]"
-                    label_text = f"[b]{acc.name}[/b] {status_line}\n[dim]{addr_short}[/dim]"
+                    staked_mutez = cached_info.get("staked_mutez", 0)
+                    label_text = self._format_stake_selector_row(
+                        account_name=acc.name,
+                        address=acc.address,
+                        balance_mutez=int(balance_mutez or 0),
+                        staked_mutez=int(staked_mutez or 0),
+                        delegate_addr=delegate_addr,
+                    )
                 else:
-                    fun_msg = get_wallet_loading_message()
                     label_text = f"[b]{acc.name}[/b] [dim]Loading... ꜩ[/dim] [dim]STK ...[/dim]\n[dim]{addr_short}[/dim]"
                 lv.append(ListItem(Label(label_text, markup=True)))
 
@@ -5211,30 +5217,13 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     "staked_seen_at": time.time() if staked_mutez > 0 else prev.get("staked_seen_at"),
                 }
 
-                # Build status tags
-                balance_xtz = mutez_to_xtz(balance_mutez)
-                balance_tag = f"[#34d399]{format_xtz(balance_xtz)} ꜩ[/#34d399]"
-                if staked_mutez > 0:
-                    staked_xtz = mutez_to_xtz(staked_mutez)
-                    if delegate_addr:
-                        status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
-                    else:
-                        status_line = f"{balance_tag} [#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
-                elif staking_active:
-                    # Best-effort: some indexers lag on stakedBalance; keep a numeric placeholder.
-                    if delegate_addr:
-                        status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]0 Staked[/#8b5cf6]"
-                    else:
-                        status_line = f"{balance_tag} [#8b5cf6]0 Staked[/#8b5cf6]"
-                elif delegate_addr:
-                    status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]0 Staked[/#8b5cf6]"
-                else:
-                    if balance_mutez <= 0:
-                        status_line = f"{balance_tag} [#f97316]NEW WALLET[/#f97316]"
-                    else:
-                        status_line = f"{balance_tag} [red]NOT DELEGATED[/red]"
-
-                label_text = f"[b]{acc.name}[/b] {status_line}\n[dim]{addr_short}[/dim]"
+                label_text = self._format_stake_selector_row(
+                    account_name=acc.name,
+                    address=acc.address,
+                    balance_mutez=balance_mutez,
+                    staked_mutez=staked_mutez,
+                    delegate_addr=delegate_addr,
+                )
 
             except _FLOW_TASK_EXCEPTIONS as e:
                 log_error(f"Failed to fetch status for {acc.name}", exception=e)
