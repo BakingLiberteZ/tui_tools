@@ -13312,8 +13312,8 @@ class WalletApp(App):
                                 exception=retry_e,
                                 rpc=target_rpc,
                             )
-                            safe_fee = max(int(fee_mutez or 0), 120_000)
-                            safe_gas = max(int(gas_limit or 0), 1_000_000)
+                            safe_fee = max(int(fee_mutez or 0), 180_000)
+                            safe_gas = max(int(gas_limit or 0), 1_040_000)
                             return delegate_to_baker(
                                 target_rpc,
                                 key,

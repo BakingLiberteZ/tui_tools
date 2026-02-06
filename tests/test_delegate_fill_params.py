@@ -166,13 +166,13 @@ def test_delegate_to_baker_gas_exhausted_retries_with_high_safety_limits(monkeyp
 
     fill_calls = [c[1] for c in recorder if c[0] == "fill"]
     assert fill_calls
-    assert any(c.get("fee") == 120000 for c in fill_calls)
-    assert any(c.get("gas_limit") == 1000000 for c in fill_calls)
+    assert any(c.get("fee") == 180000 for c in fill_calls)
+    assert any(c.get("gas_limit") == 1040000 for c in fill_calls)
 
     inject_calls = [c[1] for c in recorder if c[0] == "inject"]
     assert inject_calls
-    assert inject_calls[-1].get("gas_limit") == 1000000
-    assert inject_calls[-1].get("fee") == 120000
+    assert inject_calls[-1].get("gas_limit") == 1040000
+    assert inject_calls[-1].get("fee") == 180000
 
 
 def test_delegate_to_baker_gas_exhausted_falls_back_to_rpc_forge(monkeypatch):
@@ -217,6 +217,69 @@ def test_delegate_to_baker_gas_exhausted_falls_back_to_rpc_forge(monkeypatch):
         storage_limit=0,
     )
     assert oph == "op_forged"
+
+
+class _AutofillGasExhaustedOp:
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    def autofill(self, **kwargs):
+        self.recorder.append(("autofill", kwargs))
+        raise RuntimeError("gas_exhausted.operation")
+
+
+class _AutofillGasExhaustedClient:
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    def delegation(self, baker_address):
+        assert baker_address == "tz1NEW"
+        self.recorder.append(("delegation", {"delegate": baker_address}))
+        return _AutofillGasExhaustedOp(self.recorder)
+
+
+def test_delegate_to_baker_gas_exhausted_on_autofill_falls_back_to_rpc_forge(monkeypatch):
+    recorder = []
+
+    def _fake_using(*, shell, key):
+        return _AutofillGasExhaustedClient(recorder)
+
+    class _FakeHead:
+        @staticmethod
+        def hash():
+            return "BLfakebranch"
+
+    class _FakeShell:
+        head = _FakeHead()
+
+    class _FakeClient:
+        shell = _FakeShell()
+
+    class _FakeResponse:
+        status_code = 200
+        text = '"deadbeef"'
+
+    monkeypatch.setattr(tezos, "pytezos", type("P", (), {"using": staticmethod(_fake_using)}))
+    monkeypatch.setattr(tezos, "check_pending_operations", lambda rpc, addr: None)
+    monkeypatch.setattr(tezos, "is_wallet_revealed", lambda rpc, addr: True)
+    monkeypatch.setattr(tezos, "get_client", lambda rpc, key=None: _FakeClient())
+    monkeypatch.setattr(tezos, "get_counter", lambda rpc, addr: 42)
+    monkeypatch.setattr(tezos.requests, "post", lambda *args, **kwargs: _FakeResponse())
+    monkeypatch.setattr(tezos, "sign_and_inject_from_rpc_forge", lambda rpc, key, forged: "op_forged_autofill")
+
+    class _Key:
+        def public_key_hash(self):
+            return "tz1SRC"
+
+    oph = tezos.delegate_to_baker(
+        "https://rpc.example",
+        _Key(),
+        "tz1NEW",
+        fee_mutez=500,
+        gas_limit=1000,
+        storage_limit=0,
+    )
+    assert oph == "op_forged_autofill"
 
 
 def test_estimate_delegation_uses_high_profile_when_stake_context_detected(monkeypatch):

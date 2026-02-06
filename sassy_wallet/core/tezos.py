@@ -1946,6 +1946,9 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
             f"Cannot delegate: {pending_count} pending operation(s) detected for this wallet. "
             f"Please wait 1-2 minutes for them to confirm, then try again."
         )
+    safe_gas = max(int(gas_limit or 0), 1_040_000)
+    safe_fee = max(int(fee_mutez or 0), 180_000)
+    safe_storage = max(int(storage_limit or 0), 0)
 
     def _inject_delegate_via_rpc_forge(
         *,
@@ -2107,11 +2110,8 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
                             raise
                         # Last-resort envelope for delegation when stake-related side effects
                         # make simulation severely underestimate gas.
-                        safe_gas = max(int(gas_limit or 0), 1_000_000)
                         # Tezos minimal fee scales with gas; keep this safely above the
                         # minimum for the high-gas fallback to avoid fee-related rejections.
-                        safe_fee = max(int(fee_mutez or 0), 120_000)
-                        safe_storage = max(int(storage_limit or 0), 0)
                         log_warning(
                             "Gas exhausted on delegation with pure autofill; retrying with conservative safety overrides",
                             exception=autofill_err,
@@ -2157,6 +2157,31 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
                     log_error(f"Counter error on attempt {attempt + 1}, waiting {wait_time}s before retry", exception=e)
                     time.sleep(wait_time)
                     continue
+                if _is_gas_exhausted_error(e):
+                    log_warning(
+                        "Gas exhausted during delegation build/autofill; retrying via raw RPC forge path",
+                        exception=e,
+                        rpc=rpc,
+                        fee_mutez=safe_fee,
+                        gas_limit=safe_gas,
+                        storage_limit=safe_storage,
+                    )
+                    try:
+                        return _inject_delegate_via_rpc_forge(
+                            fee_value=safe_fee,
+                            gas_value=safe_gas,
+                            storage_value=safe_storage,
+                        )
+                    except _OP_RETRY_EXCEPTIONS as forge_err:
+                        if _is_counter_sync_error(forge_err) and attempt < max_retries:
+                            wait_time = 5.0 * (attempt + 1)
+                            log_error(
+                                f"Counter error on RPC-forge delegation attempt {attempt + 1}, waiting {wait_time}s before retry",
+                                exception=forge_err,
+                            )
+                            time.sleep(wait_time)
+                            continue
+                        raise
                 else:
                     # Not a counter error or out of retries
                     raise last_error
