@@ -13273,7 +13273,7 @@ class WalletApp(App):
         flow_start = time.time()
         self._ui(
             self._start_breathing_effect,
-            "⏳ Changing baker... This may take a moment...",
+            "🧑‍🍳 Sending your dough to a new kitchen...",
             bright_class="status-warning",
             dim_class="status-warning-dim",
         )
@@ -13483,20 +13483,17 @@ class WalletApp(App):
 
         self._ui(
             self._set_status,
-            "⏳ Baker change submitted. Waiting for delegation confirmation...",
+            "🧑‍🍳 Sending your dough to a new kitchen...",
             force=True,
         )
 
         def _finish_change_baker_status() -> None:
             self._stop_breathing_effect()
             self._set_busy(False)
-            if pre_change_staked_mutez > 0:
-                self._set_status_styled_locked(
-                    "✅ Baker changed. Existing stake is now redelegating to the new baker.",
-                    style="warning",
-                )
-            else:
-                self._set_status_styled_locked("✅ Baker changed. Fresh oven, fresh rewards.", style="warning")
+            self._set_status_styled_locked(
+                "✅ Baker changed. Your stake now cooks in the new kitchen.",
+                style="warning",
+            )
 
         self._ui(self._schedule_after, remaining, _finish_change_baker_status)
         self._ui(
