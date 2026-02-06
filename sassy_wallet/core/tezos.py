@@ -2070,8 +2070,12 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
                     except _OP_RETRY_EXCEPTIONS as autofill_err:
                         if not _is_gas_exhausted_error(autofill_err):
                             raise
-                        safe_fee = max(int(fee_mutez or 0), 15_000)
-                        safe_gas = max(int(gas_limit or 0), 120_000)
+                        # Last-resort envelope for delegation when stake-related side effects
+                        # make simulation severely underestimate gas.
+                        safe_gas = max(int(gas_limit or 0), 1_000_000)
+                        # Tezos minimal fee scales with gas; keep this safely above the
+                        # minimum for the high-gas fallback to avoid fee-related rejections.
+                        safe_fee = max(int(fee_mutez or 0), 120_000)
                         safe_storage = max(int(storage_limit or 0), 0)
                         log_warning(
                             "Gas exhausted on delegation with pure autofill; retrying with conservative safety overrides",

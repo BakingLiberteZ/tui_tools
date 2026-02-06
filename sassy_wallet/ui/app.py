@@ -13306,8 +13306,8 @@ class WalletApp(App):
                                 exception=retry_e,
                                 rpc=target_rpc,
                             )
-                            safe_fee = max(int(fee_mutez or 0), 15_000)
-                            safe_gas = max(int(gas_limit or 0), 120_000)
+                            safe_fee = max(int(fee_mutez or 0), 120_000)
+                            safe_gas = max(int(gas_limit or 0), 1_000_000)
                             return delegate_to_baker(
                                 target_rpc,
                                 key,
@@ -13426,8 +13426,8 @@ class WalletApp(App):
                     self._ui(self._stop_breathing_effect)
                     self._ui(self._set_busy, False)
                     error_msg = (
-                        "Gas limit exhausted on this RPC after automatic fallback. "
-                        "Try again in a moment or switch RPC."
+                        "Gas exhausted even with high safety limits. "
+                        "If this wallet has active stake, unstake first and then change baker."
                     )
                     if len(error_msg) > 150:
                         error_msg = error_msg[:150] + "..."

@@ -109,7 +109,7 @@ class _GasFallbackOp:
 
     def inject(self):
         self.recorder.append(("inject", {"fee": self._fee, "gas_limit": self._gas, "storage_limit": self._storage}))
-        if self._gas < 120000:
+        if self._gas < 1000000:
             raise RuntimeError("gas_exhausted.operation")
         return "op_safe"
 
@@ -150,13 +150,13 @@ def test_delegate_to_baker_gas_exhausted_retries_with_high_safety_limits(monkeyp
 
     fill_calls = [c[1] for c in recorder if c[0] == "fill"]
     assert fill_calls
-    assert any(c.get("fee") == 15000 for c in fill_calls)
-    assert any(c.get("gas_limit") == 120000 for c in fill_calls)
+    assert any(c.get("fee") == 120000 for c in fill_calls)
+    assert any(c.get("gas_limit") == 1000000 for c in fill_calls)
 
     inject_calls = [c[1] for c in recorder if c[0] == "inject"]
     assert inject_calls
-    assert inject_calls[-1].get("gas_limit") == 120000
-    assert inject_calls[-1].get("fee") == 15000
+    assert inject_calls[-1].get("gas_limit") == 1000000
+    assert inject_calls[-1].get("fee") == 120000
 
 
 def test_estimate_delegation_uses_high_profile_when_stake_context_detected(monkeypatch):
