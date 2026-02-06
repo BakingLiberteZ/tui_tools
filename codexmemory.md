@@ -144,6 +144,10 @@
 - hash-resolution fallback to staking endpoint
 - Added runtime debug export for field QA:
 - `Ctrl+D` in app exports `logs/history_debug_*.json` with visible history, cache, pending ops, overrides, and live pull.
+- Stake/unstake retention fix:
+- Some indexer paths return staking amounts as decimal strings; parser now converts decimal XTZ strings to mutez (`_as_amount_mutez`) instead of collapsing to `0`.
+- This prevents real stake/unstake rows from being dropped by shared-hash delegation preference logic.
+- Added regressions in `tests/test_tzkt_history_dedupe.py` for decimal-string stake/unstake amounts with shared hashes.
 
 ## Stake Flow Reliability Notes (2026-02-06)
 

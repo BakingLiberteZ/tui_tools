@@ -1,5 +1,5 @@
 from typing import Optional, Any, Dict, List, Callable
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import json
 import re
 import urllib.request
@@ -1143,6 +1143,35 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         except (TypeError, ValueError):
             return 0
 
+    def _as_amount_mutez(v: Any) -> int:
+        """Parse amount-like values into mutez.
+
+        TzKT may return integer mutez or decimal strings in XTZ on some staking paths.
+        """
+        if v is None:
+            return 0
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float):
+            # Treat non-integer floats as XTZ values.
+            if float(v).is_integer():
+                return int(v)
+            return int((Decimal(str(v)) * Decimal("1000000")).to_integral_value())
+        try:
+            s = str(v).strip()
+            if not s:
+                return 0
+            # Integer-like values are already mutez.
+            if re.fullmatch(r"[+-]?\d+", s):
+                return int(s)
+            # Decimal values are interpreted as XTZ and converted to mutez.
+            d = Decimal(s)
+            return int((d * Decimal("1000000")).to_integral_value())
+        except (TypeError, ValueError, InvalidOperation):
+            return 0
+
     tx_items = _fetch_list(tx_url)
     stake_items = _fetch_list(stake_url)
     unstake_items = _fetch_list(unstake_url)
@@ -1214,7 +1243,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         h = str(it.get("hash") or "").strip()
         sender = _extract_addr(it, "sender", "source")
         target = _extract_addr(it, "target", "destination")
-        amount_mutez = int(it.get("amount") or 0)
+        amount_mutez = _as_amount_mutez(it.get("amount"))
         params = it.get("parameter") or it.get("parameters") or {}
         entrypoint = params.get("entrypoint") if isinstance(params, dict) else None
         # Prefer explicit delegation semantics when same operation hash appears
@@ -1274,7 +1303,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
 
     for it in stake_items:
         h = it.get("hash") or ""
-        amount_mutez = int(it.get("amount") or 0)
+        amount_mutez = _as_amount_mutez(it.get("amount"))
         # Keep non-zero stake ops even if the same hash appears in delegations:
         # operation groups can contain multiple manager contents sharing one hash.
         if h in deleg_hashes and amount_mutez == 0:
@@ -1304,7 +1333,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
 
     for it in unstake_items:
         h = it.get("hash") or ""
-        amount_mutez = int(it.get("amount") or 0)
+        amount_mutez = _as_amount_mutez(it.get("amount"))
         # Keep non-zero unstake ops even if hash overlaps delegation rows.
         if h in deleg_hashes and amount_mutez == 0:
             stats["drop_unstake_pref_deleg"] += 1
@@ -1339,7 +1368,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         if op_kind not in ("stake", "unstake"):
             continue
         h = it.get("hash") or ""
-        amount_mutez = _as_int_mutez(it.get("amount"))
+        amount_mutez = _as_amount_mutez(it.get("amount"))
         # Prefer delegation only when staking-side amount is zero (duplicate/indexer artifact).
         if h in deleg_hashes and amount_mutez == 0:
             stats["drop_staking_pref_deleg"] += 1

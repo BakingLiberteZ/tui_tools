@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 
 from sassy_wallet.core import tezos
@@ -329,6 +331,75 @@ def test_get_xtz_history_keeps_nonzero_staking_when_hash_is_shared_with_delegati
     directions = {it.get("direction") for it in same_hash}
     assert "STK" in directions
     assert "DEL" in directions
+
+
+def test_get_xtz_history_keeps_decimal_string_stake_amount_when_hash_is_shared(monkeypatch):
+    address = "tz1SOURCE11111111111111111111111111111"
+    _mock_history_sources(
+        monkeypatch,
+        tx_items=[],
+        stake_items=[
+            {
+                "timestamp": "2026-02-06T12:05:45Z",
+                "sender": {"address": address},
+                "target": {"address": address},
+                "amount": "0.01",
+                "hash": "op_shared_decimal_stake",
+                "parameter": {"entrypoint": "stake"},
+                "metadata": {},
+            }
+        ],
+        unstake_items=[],
+        staking_items=[],
+        deleg_items=[
+            {
+                "timestamp": "2026-02-06T12:05:45Z",
+                "sender": {"address": address},
+                "newDelegate": {"address": "tz1BAKER11111111111111111111111111111", "alias": "Baker One"},
+                "hash": "op_shared_decimal_stake",
+            }
+        ],
+    )
+
+    items = tezos.get_xtz_history("https://rpc.tzkt.io/mainnet", address, limit=10)
+    same_hash = [it for it in items if it.get("hash") == "op_shared_decimal_stake"]
+    stake_row = next(it for it in same_hash if it.get("direction") == "STK")
+    assert stake_row.get("amount_xtz") == Decimal("0.01")
+    assert any(it.get("direction") == "DEL" for it in same_hash)
+
+
+def test_get_xtz_history_keeps_decimal_string_unstake_amount_from_staking_endpoint(monkeypatch):
+    address = "tz1SOURCE11111111111111111111111111111"
+    _mock_history_sources(
+        monkeypatch,
+        tx_items=[],
+        stake_items=[],
+        unstake_items=[],
+        staking_items=[
+            {
+                "timestamp": "2026-02-06T12:06:15Z",
+                "type": "unstake",
+                "sender": {"address": address},
+                "amount": "0.02",
+                "hash": "op_shared_decimal_unstake",
+                "metadata": {},
+            }
+        ],
+        deleg_items=[
+            {
+                "timestamp": "2026-02-06T12:06:15Z",
+                "sender": {"address": address},
+                "newDelegate": {"address": "tz1BAKER11111111111111111111111111111", "alias": "Baker One"},
+                "hash": "op_shared_decimal_unstake",
+            }
+        ],
+    )
+
+    items = tezos.get_xtz_history("https://rpc.tzkt.io/mainnet", address, limit=10)
+    same_hash = [it for it in items if it.get("hash") == "op_shared_decimal_unstake"]
+    unstake_row = next(it for it in same_hash if it.get("direction") == "UST")
+    assert unstake_row.get("amount_xtz") == Decimal("0.02")
+    assert any(it.get("direction") == "DEL" for it in same_hash)
 
 
 def test_get_xtz_history_prefers_delegation_over_zero_tx_when_hash_is_shared(monkeypatch):
