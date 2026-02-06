@@ -1171,6 +1171,9 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         out.append(item)
 
     for it in deleg_items:
+        h = it.get("hash") or ""
+        if h and h in seen_hashes:
+            continue
         delegate_addr, delegate_alias = _extract_delegate(it)
         direction = "DEL" if delegate_addr else "UND"
         if delegate_alias:
@@ -1186,10 +1189,13 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
                 "direction": direction,
                 "amount_xtz": Decimal(0),
                 "counterparty": counterparty,
-                "hash": it.get("hash") or "",
+                "hash": h,
                 "kind": "delegation",
+                "entrypoint": "delegation",
             }
         )
+        if h:
+            seen_hashes.add(h)
 
     out.sort(key=lambda x: x.get("ts") or "", reverse=True)
     out = out[:limit]
