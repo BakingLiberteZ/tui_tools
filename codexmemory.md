@@ -53,6 +53,9 @@
 - `textual` `7.3.0` -> `7.5.0`
 - `cryptography` `46.0.3` -> `46.0.4`
 - `bip_utils` aligned at `2.10.0` for resolver compatibility with `pytezos==3.17.0`.
+- Additional CVE response:
+- `urllib3` further upgraded to `2.6.3` after local `pip-audit` reported `CVE-2026-21441` affecting `2.6.0`.
+- `ecdsa` (`CVE-2024-23342`) currently has no fixed version in resolver output; exception is explicitly tracked and temporarily ignored in CI `pip-audit` gates.
 
 ## CI/CD Hardening Implemented
 

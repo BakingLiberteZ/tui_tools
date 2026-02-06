@@ -35,7 +35,7 @@ uv run ruff check . --fix
 uv run ruff format .
 uv run ty check
 uv run bandit -r sassy_wallet -ll -ii
-uv run pip-audit -l
+uv run pip-audit -l --ignore-vuln CVE-2024-23342
 ```
 
 ## Data location

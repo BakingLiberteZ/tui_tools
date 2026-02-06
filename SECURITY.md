@@ -28,7 +28,7 @@ uv run ruff check . --fix
 uv run ruff format .
 uv run ty check
 uv run bandit -r sassy_wallet -ll -ii
-uv run pip-audit -l
+uv run pip-audit -l --ignore-vuln CVE-2024-23342
 uv run pytest -q
 ```
 
@@ -50,3 +50,8 @@ CI enforces:
   - static analysis (`bandit`, medium/high confidence)
   - dependency audit (`pip-audit`)
   - machine-readable report artifacts (`bandit-report.json`, `pip-audit-report.json`, `dependency-sbom.cdx.json`)
+
+## Tracked Exceptions
+
+- `CVE-2024-23342` (`ecdsa==0.19.1`) is currently ignored in `pip-audit` gates because no fixed release is available.
+- This package is pulled transitively by `bip_utils`; remove the exception as soon as an upstream fixed chain is available.
