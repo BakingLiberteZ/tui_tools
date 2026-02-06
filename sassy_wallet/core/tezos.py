@@ -1947,6 +1947,41 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
             f"Please wait 1-2 minutes for them to confirm, then try again."
         )
 
+    def _inject_delegate_via_rpc_forge(
+        *,
+        fee_value: int,
+        gas_value: int,
+        storage_value: int,
+    ) -> str:
+        """Inject delegation using RPC forge/sign path as a compatibility fallback."""
+        client = get_client(rpc, key=key)
+        branch = client.shell.head.hash()
+        counter_to_use = get_counter(rpc, source_address)
+        op_contents = {
+            "kind": "delegation",
+            "source": source_address,
+            "fee": str(int(fee_value)),
+            "counter": str(int(counter_to_use)),
+            "gas_limit": str(int(gas_value)),
+            "storage_limit": str(int(storage_value)),
+            "delegate": baker_address,
+        }
+        forge_payload = {"branch": branch, "contents": [op_contents]}
+        forge_url = f"{rpc}/chains/main/blocks/head/helpers/forge/operations"
+        forge_response = requests.post(
+            forge_url,
+            json=forge_payload,
+            headers={"content-type": "application/json"},
+            timeout=30,
+        )
+        if forge_response.status_code != 200:
+            raise RuntimeError(f"RPC forge failed (delegation): {forge_response.status_code} - {forge_response.text}")
+        rpc_forged_hex = forge_response.text.strip().strip('"')
+        raw_result = sign_and_inject_from_rpc_forge(rpc, key, rpc_forged_hex)
+        if isinstance(raw_result, dict):
+            return str(raw_result.get("hash", str(raw_result)))
+        return str(raw_result)
+
     def _inject_with_retry(max_retries: int = 3):
         """Build, autofill, sign, and inject with counter error retry logic."""
         last_error = None
@@ -2085,11 +2120,28 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
                             gas_limit=safe_gas,
                             storage_limit=safe_storage,
                         )
-                        result = _inject_delegate_once(
-                            fee_override=safe_fee,
-                            gas_override=safe_gas,
-                            storage_override=safe_storage,
-                        )
+                        try:
+                            result = _inject_delegate_once(
+                                fee_override=safe_fee,
+                                gas_override=safe_gas,
+                                storage_override=safe_storage,
+                            )
+                        except _OP_RETRY_EXCEPTIONS as safety_err:
+                            if not _is_gas_exhausted_error(safety_err):
+                                raise
+                            log_warning(
+                                "Gas exhausted on delegation safety overrides; retrying via raw RPC forge path",
+                                exception=safety_err,
+                                rpc=rpc,
+                                fee_mutez=safe_fee,
+                                gas_limit=safe_gas,
+                                storage_limit=safe_storage,
+                            )
+                            result = _inject_delegate_via_rpc_forge(
+                                fee_value=safe_fee,
+                                gas_value=safe_gas,
+                                storage_value=safe_storage,
+                            )
 
                 # Normalize result
                 if isinstance(result, dict):

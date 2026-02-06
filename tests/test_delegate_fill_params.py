@@ -124,6 +124,22 @@ class _GasFallbackClient:
         return _GasFallbackOp(self.recorder)
 
 
+class _AlwaysGasExhaustedOp(_GasFallbackOp):
+    def inject(self):
+        self.recorder.append(("inject", {"fee": self._fee, "gas_limit": self._gas, "storage_limit": self._storage}))
+        raise RuntimeError("gas_exhausted.operation")
+
+
+class _AlwaysGasExhaustedClient:
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    def delegation(self, baker_address):
+        assert baker_address == "tz1NEW"
+        self.recorder.append(("delegation", {"delegate": baker_address}))
+        return _AlwaysGasExhaustedOp(self.recorder)
+
+
 def test_delegate_to_baker_gas_exhausted_retries_with_high_safety_limits(monkeypatch):
     recorder = []
 
@@ -157,6 +173,50 @@ def test_delegate_to_baker_gas_exhausted_retries_with_high_safety_limits(monkeyp
     assert inject_calls
     assert inject_calls[-1].get("gas_limit") == 1000000
     assert inject_calls[-1].get("fee") == 120000
+
+
+def test_delegate_to_baker_gas_exhausted_falls_back_to_rpc_forge(monkeypatch):
+    recorder = []
+
+    def _fake_using(*, shell, key):
+        return _AlwaysGasExhaustedClient(recorder)
+
+    class _FakeHead:
+        @staticmethod
+        def hash():
+            return "BLfakebranch"
+
+    class _FakeShell:
+        head = _FakeHead()
+
+    class _FakeClient:
+        shell = _FakeShell()
+
+    class _FakeResponse:
+        status_code = 200
+        text = '"deadbeef"'
+
+    monkeypatch.setattr(tezos, "pytezos", type("P", (), {"using": staticmethod(_fake_using)}))
+    monkeypatch.setattr(tezos, "check_pending_operations", lambda rpc, addr: None)
+    monkeypatch.setattr(tezos, "is_wallet_revealed", lambda rpc, addr: True)
+    monkeypatch.setattr(tezos, "get_client", lambda rpc, key=None: _FakeClient())
+    monkeypatch.setattr(tezos, "get_counter", lambda rpc, addr: 42)
+    monkeypatch.setattr(tezos.requests, "post", lambda *args, **kwargs: _FakeResponse())
+    monkeypatch.setattr(tezos, "sign_and_inject_from_rpc_forge", lambda rpc, key, forged: "op_forged")
+
+    class _Key:
+        def public_key_hash(self):
+            return "tz1SRC"
+
+    oph = tezos.delegate_to_baker(
+        "https://rpc.example",
+        _Key(),
+        "tz1NEW",
+        fee_mutez=500,
+        gas_limit=1000,
+        storage_limit=0,
+    )
+    assert oph == "op_forged"
 
 
 def test_estimate_delegation_uses_high_profile_when_stake_context_detected(monkeypatch):

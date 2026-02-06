@@ -13176,8 +13176,6 @@ class WalletApp(App):
         new_baker_address = stake_data.get("baker_address")
         current_baker_address = stake_data.get("current_baker") or ""
         pre_change_staked_mutez = 0
-        pre_change_unstaked_mutez = 0
-        pre_change_staking_active = False
 
         if not account or not new_baker_address:
             log_error("Invalid change_baker data received", stake_data=stake_data)
@@ -13195,8 +13193,6 @@ class WalletApp(App):
             )
             chain_current = state.get("delegate") or ""
             pre_change_staked_mutez = int(state.get("staked_mutez") or 0)
-            pre_change_unstaked_mutez = int(state.get("unstaked_mutez") or 0)
-            pre_change_staking_active = bool(state.get("staking_active")) or pre_change_staked_mutez > 0 or pre_change_unstaked_mutez > 0
             if chain_current:
                 current_baker_address = chain_current
         except _FLOW_PRECHECK_EXCEPTIONS as e:
@@ -13205,25 +13201,6 @@ class WalletApp(App):
         if current_baker_address and current_baker_address == new_baker_address:
             self._set_status("ℹ️ Already delegated to that baker.")
             return True
-
-        # Empirically on current protocol/RPC paths this operation repeatedly fails with
-        # gas_exhausted when there is active stake. Short-circuit early with clear guidance
-        # instead of making the user wait through long multi-RPC retries.
-        if pre_change_staking_active:
-            staked_xtz = format_xtz(mutez_to_xtz(pre_change_staked_mutez))
-            unstaked_xtz = format_xtz(mutez_to_xtz(pre_change_unstaked_mutez))
-            stake_state = f"staked={staked_xtz} XTZ, pending_unstake={unstaked_xtz} XTZ"
-            self._status_lock_until_refresh = False
-            self._stop_breathing_effect()
-            self._set_busy(False)
-            self._set_status_styled(
-                f"❌ Cannot change baker while staking state is active ({stake_state}). "
-                "Unstake first, wait inclusion, then change baker.",
-                style="error",
-                duration=8.0,
-                force=True,
-            )
-            return False
 
         key = stake_data.get("key")
         fee_mutez = stake_data.get("fee_mutez")
@@ -13455,8 +13432,8 @@ class WalletApp(App):
                     self._ui(self._stop_breathing_effect)
                     self._ui(self._set_busy, False)
                     error_msg = (
-                        "Gas exhausted even with high safety limits. "
-                        "If this wallet has active stake, unstake first and then change baker."
+                        "Gas exhausted even with high safety limits across retries/RPCs. "
+                        "Try again in a minute or switch RPC."
                     )
                     if len(error_msg) > 150:
                         error_msg = error_msg[:150] + "..."
@@ -13494,20 +13471,19 @@ class WalletApp(App):
             thread=True,
         )
 
-        # Fast local cache hint for StakeScreen reopen: after changing baker, existing stake
-        # transitions to unstaking and cannot be re-staked until finalization.
+        # Fast local cache hint for StakeScreen reopen: preserve current stake amounts,
+        # only update delegate eagerly while chain confirmation arrives.
         if pre_change_staked_mutez > 0:
             cached = self._stake_wallet_info_cache.get(account.address) or {}
             cached["delegate_addr"] = new_baker_address
-            cached["staked_mutez"] = 0
-            cached["unstaked_mutez"] = max(int(cached.get("unstaked_mutez") or 0), pre_change_staked_mutez)
-            cached["staking_active"] = True
+            cached["staked_mutez"] = max(int(cached.get("staked_mutez") or 0), pre_change_staked_mutez)
+            cached["staking_active"] = bool(int(cached.get("staked_mutez") or 0) or int(cached.get("unstaked_mutez") or 0))
             cached["fetched_at"] = time.time()
             self._stake_wallet_info_cache[account.address] = cached
 
         self._ui(
             self._set_status,
-            "⏳ Baker change submitted. Previous stake (if any) is now unstaking until finalization...",
+            "⏳ Baker change submitted. Waiting for delegation confirmation...",
             force=True,
         )
 
