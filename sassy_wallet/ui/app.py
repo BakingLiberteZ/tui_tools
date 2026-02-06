@@ -4882,6 +4882,14 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         padding: 0 0 0 2;
     }
 
+    /* Keep selection visible without washing out wallet status colors. */
+    StakeScreen #wallet_selector > ListItem.--highlight,
+    StakeScreen #wallet_selector > ListItem.--selected,
+    StakeScreen #wallet_selector:focus > ListItem.--highlight,
+    StakeScreen #wallet_selector:focus > ListItem.--selected {
+        background: rgba(37, 99, 235, 0.14);
+    }
+
     StakeScreen #fun_note {
         color: #d4a857;
         text-style: italic;
