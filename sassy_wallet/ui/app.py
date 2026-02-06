@@ -1325,7 +1325,7 @@ class PromptScreen(ModalScreen[str]):
     }
 
     PromptScreen #fun_note {
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         margin-top: 1;
         margin-bottom: 1;
@@ -1342,7 +1342,7 @@ class PromptScreen(ModalScreen[str]):
     }
 
     PromptScreen #inp:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     PromptScreen Horizontal {
@@ -1457,7 +1457,7 @@ class SendAmountScreen(PromptScreen):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #10b981;
+        border: heavy #2ea676;
         padding: 1 2;
     }
 
@@ -1477,7 +1477,7 @@ class SendAmountScreen(PromptScreen):
     SendAmountScreen #amount_comment {
         margin-top: 1;
         margin-bottom: 0;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 2;
     }
@@ -1549,7 +1549,7 @@ class SendPassphraseScreen(PromptScreen):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #10b981;
+        border: heavy #2ea676;
         padding: 1 2;
     }
 
@@ -1558,7 +1558,7 @@ class SendPassphraseScreen(PromptScreen):
     }
 
     SendPassphraseScreen #title {
-        color: #fbbf24;
+        color: #d4a857;
     }
 
     SendPassphraseScreen #wallet_info {
@@ -1604,12 +1604,12 @@ class BackupConfirmPassphraseScreen(PromptScreen):
     """Prompt screen for confirming backup encryption password (yellow confirm button)."""
     CSS = """
     BackupConfirmPassphraseScreen #ok {
-        background: #f97316;
+        background: #c28756;
         color: white;
     }
 
     BackupConfirmPassphraseScreen #ok:hover {
-        background: #ea580c;
+        background: #9f6f44;
         color: white;
     }
     """
@@ -1650,13 +1650,13 @@ class BackupPassphraseScreen(ModalScreen[Optional[dict]]):
 
     BackupPassphraseScreen #inp_pass:focus,
     BackupPassphraseScreen #inp_confirm:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     BackupPassphraseScreen #hint {
         margin-top: 1;
         margin-bottom: 1;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 2;
     }
@@ -1670,12 +1670,12 @@ class BackupPassphraseScreen(ModalScreen[Optional[dict]]):
     }
 
     BackupPassphraseScreen #ok {
-        background: #f97316;
+        background: #c28756;
         color: white;
     }
 
     BackupPassphraseScreen #ok:hover {
-        background: #ea580c;
+        background: #9f6f44;
         color: white;
     }
     """
@@ -1756,7 +1756,7 @@ class StakeAmountScreen(PromptScreen):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #8b5cf6;
+        border: heavy #7b6cc4;
         padding: 1 2;
     }
 
@@ -1776,7 +1776,7 @@ class StakeAmountScreen(PromptScreen):
     StakeAmountScreen #amount_comment {
         margin-top: 1;
         margin-bottom: 0;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 2;
     }
@@ -1845,7 +1845,7 @@ class StakePassphraseScreen(PromptScreen):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #8b5cf6;
+        border: heavy #7b6cc4;
         padding: 1 2;
     }
 
@@ -1854,7 +1854,7 @@ class StakePassphraseScreen(PromptScreen):
     }
 
     StakePassphraseScreen #title {
-        color: #fbbf24;
+        color: #d4a857;
     }
 
     StakePassphraseScreen #wallet_info {
@@ -1912,7 +1912,7 @@ class WarningPassphraseScreen(StakePassphraseScreen):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #eab308;
+        border: heavy #c99c4d;
         padding: 1 2;
     }
 
@@ -1921,7 +1921,7 @@ class WarningPassphraseScreen(StakePassphraseScreen):
     }
 
     WarningPassphraseScreen #title {
-        color: #fbbf24;
+        color: #d4a857;
     }
 
     WarningPassphraseScreen #wallet_info {
@@ -1973,7 +1973,7 @@ class ConfirmStakeScreen(ModalScreen[dict]):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #8b5cf6;
+        border: heavy #7b6cc4;
         padding: 1 2;
     }
 
@@ -1989,7 +1989,7 @@ class ConfirmStakeScreen(ModalScreen[dict]):
     ConfirmStakeScreen #confirm_comment {
         margin-top: 1;
         margin-bottom: 0;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 2;
     }
@@ -2097,23 +2097,23 @@ class ConfirmStakeScreen(ModalScreen[dict]):
 
         if estimating:
             lines = [
-                f"[b #fdba74]Network:[/b #fdba74]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b #fdba74]Address:[/b #fdba74]   {self.address}",
+                f"[b #d6ad79]Address:[/b #d6ad79]   {self.address}",
                 "",
-                f"[b #8b5cf6]To:[/b #8b5cf6]        {self._baker_label}",
+                f"[b #7b6cc4]To:[/b #7b6cc4]        {self._baker_label}",
                 "",
-                f"[b #fdba74]Amount:[/b #fdba74]    {format_xtz(self.amount)} XTZ",
+                f"[b #d6ad79]Amount:[/b #d6ad79]    {format_xtz(self.amount)} XTZ",
             ]
         elif err:
             lines = [
-                f"[b #fdba74]Network:[/b #fdba74]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b #fdba74]Address:[/b #fdba74]   {self.address}",
+                f"[b #d6ad79]Address:[/b #d6ad79]   {self.address}",
                 "",
-                f"[b #8b5cf6]To:[/b #8b5cf6]        {self._baker_label}",
+                f"[b #7b6cc4]To:[/b #7b6cc4]        {self._baker_label}",
                 "",
-                f"[b #fdba74]Amount:[/b #fdba74]    {format_xtz(self.amount)} XTZ",
+                f"[b #d6ad79]Amount:[/b #d6ad79]    {format_xtz(self.amount)} XTZ",
                 "",
                 f"[red]Fee estimate failed:[/red] {err}",
                 "",
@@ -2121,13 +2121,13 @@ class ConfirmStakeScreen(ModalScreen[dict]):
             ]
         else:
             lines = [
-                f"[b #fdba74]Network:[/b #fdba74]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b #fdba74]Address:[/b #fdba74]   {self.address}",
+                f"[b #d6ad79]Address:[/b #d6ad79]   {self.address}",
                 "",
-                f"[b #8b5cf6]To:[/b #8b5cf6]        {self._baker_label}",
+                f"[b #7b6cc4]To:[/b #7b6cc4]        {self._baker_label}",
                 "",
-                f"[b #fdba74]Amount:[/b #fdba74]    {format_xtz(self.amount)} XTZ",
+                f"[b #d6ad79]Amount:[/b #d6ad79]    {format_xtz(self.amount)} XTZ",
             ]
 
         self.query_one("#summary", Static).update("\n".join(lines))
@@ -2242,7 +2242,7 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #8b5cf6;
+        border: heavy #7b6cc4;
         padding: 1 2;
     }
 
@@ -2258,7 +2258,7 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
     ConfirmUnstakeScreen #confirm_comment {
         margin-top: 1;
         margin-bottom: 0;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 2;
     }
@@ -2286,17 +2286,17 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
     }
 
     ConfirmUnstakeScreen #unstake {
-        background: #8b5cf6;
+        background: #7b6cc4;
         color: #f8fafc;
     }
 
     ConfirmUnstakeScreen #unstake:hover {
-        background: #7c3aed;
+        background: #6658aa;
         color: #f8fafc;
     }
 
     ConfirmUnstakeScreen #unstake:focus {
-        background: #6d28d9;
+        background: #554798;
         color: #f8fafc;
     }
     """
@@ -2366,19 +2366,19 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
 
         if estimating:
             lines = [
-                f"[b #fdba74]Network:[/b #fdba74]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b cyan]Address:[/b cyan]   {self.address}",
+                f"[b #8cb7c5]Address:[/b #8cb7c5]   {self.address}",
                 "",
-                f"[b #fdba74]Amount:[/b #fdba74]    {format_xtz(self.amount)} XTZ",
+                f"[b #d6ad79]Amount:[/b #d6ad79]    {format_xtz(self.amount)} XTZ",
             ]
         elif err:
             lines = [
-                f"[b #fdba74]Network:[/b #fdba74]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b cyan]Address:[/b cyan]   {self.address}",
+                f"[b #8cb7c5]Address:[/b #8cb7c5]   {self.address}",
                 "",
-                f"[b #fdba74]Amount:[/b #fdba74]    {format_xtz(self.amount)} XTZ",
+                f"[b #d6ad79]Amount:[/b #d6ad79]    {format_xtz(self.amount)} XTZ",
                 "",
                 f"[red]Fee estimate failed:[/red] {err}",
                 "",
@@ -2388,11 +2388,11 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
             lines = [
                 "[b]Confirm Unstake Operation[/b]",
                 "",
-                f"[b #fdba74]Network:[/b #fdba74]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b cyan]Address:[/b cyan]   {self.address}",
+                f"[b #8cb7c5]Address:[/b #8cb7c5]   {self.address}",
                 "",
-                f"[b #fdba74]Amount:[/b #fdba74]    {format_xtz(self.amount)} XTZ",
+                f"[b #d6ad79]Amount:[/b #d6ad79]    {format_xtz(self.amount)} XTZ",
             ]
 
         self.query_one("#summary", Static).update("\n".join(lines))
@@ -2503,7 +2503,7 @@ class NetworkPickerScreen(ModalScreen[str]):
     }
 
     NetworkPickerScreen #fun_note {
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         margin-top: 1;
         margin-bottom: 1;
@@ -2619,7 +2619,7 @@ class RpcPickerScreen(ModalScreen[str]):
     }
 
     RpcPickerScreen #fun_note {
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         margin-top: 1;
         margin-bottom: 1;
@@ -2838,7 +2838,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
     ImportWizardScreen #hint {
         margin-top: 0;
         margin-bottom: 1;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 1;
         padding-left: 1;
@@ -2855,7 +2855,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
     ImportWizardScreen #mnemonic_store_hint {
         margin-top: 0;
         margin-bottom: 1;
-        color: #fbbf24;
+        color: #d4a857;
         padding-left: 1;
     }
 
@@ -2891,7 +2891,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
     }
 
     ImportWizardScreen Input:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     ImportWizardScreen #inp_mnemonic {
@@ -2959,12 +2959,12 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
             yield Input(placeholder="BIP39 passphrase (optional)", id="inp_mnemonic_pass", password=True)
             yield Input(placeholder="Password to encrypt wallet", id="inp_passphrase", password=True)
             yield Static(
-                "[yellow]Password encrypts keys (AES-256-GCM + scrypt).[/yellow]",
+                "[#d4a857]Password encrypts keys (AES-256-GCM + scrypt).[/#d4a857]",
                 id="secret_hint",
                 markup=True,
             )
             yield Static(
-                "[yellow]Password encrypts keys (AES-256-GCM + scrypt).[/yellow]",
+                "[#d4a857]Password encrypts keys (AES-256-GCM + scrypt).[/#d4a857]",
                 id="mnemonic_store_hint",
                 markup=True,
             )
@@ -3050,7 +3050,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
         if not ok:
             self._set_error(f"[red]✗ {err}[/red]")
         else:
-            self._set_error("[#34d399]✓ Address looks valid[/#34d399]")
+            self._set_error("[#4bbf95]✓ Address looks valid[/#4bbf95]")
 
     @on(Input.Changed, "#inp_mnemonic")
     def mnemonic_changed(self, event: Input.Changed) -> None:
@@ -3539,7 +3539,7 @@ class ImportTypeSelectorScreen(ModalScreen[Optional[str]]):
     }
 
     ImportTypeSelectorScreen #fun_note {
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         margin-top: 1;
         margin-bottom: 1;
@@ -3657,11 +3657,11 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
     ImportSecretScreen #inp_secret:focus,
     ImportSecretScreen #inp_secret_pass:focus,
     ImportSecretScreen #inp_passphrase:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     ImportSecretScreen #fun_note {
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         margin-top: 1;
         margin-bottom: 1;
@@ -3672,7 +3672,7 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
     ImportSecretScreen #secret_hint {
         margin-top: 0;
         margin-bottom: 0;
-        color: #fbbf24;
+        color: #d4a857;
     }
 
     ImportSecretScreen Horizontal {
@@ -3692,7 +3692,7 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
             yield Input(placeholder="Passphrase for encrypted secret (edesk, if applicable)", id="inp_secret_pass", password=True)
             yield Input(placeholder="Password to encrypt wallet", id="inp_passphrase", password=True)
             yield Static(
-                "[yellow]Password encrypts keys (AES-256-GCM + scrypt).[/yellow]",
+                "[#d4a857]Password encrypts keys (AES-256-GCM + scrypt).[/#d4a857]",
                 id="secret_hint",
                 markup=True,
             )
@@ -3781,11 +3781,11 @@ class ImportWatchScreen(ModalScreen[Optional[dict]]):
 
     ImportWatchScreen #inp_name:focus,
     ImportWatchScreen #inp_address:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     ImportWatchScreen #fun_note {
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         margin-top: 1;
         margin-bottom: 1;
@@ -3961,7 +3961,7 @@ class BackupWalletSelectorScreen(WalletSelectorScreen):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #f97316;
+        border: heavy #c28756;
         padding: 1 2;
     }
 
@@ -3971,7 +3971,7 @@ class BackupWalletSelectorScreen(WalletSelectorScreen):
     }
 
     BackupWalletSelectorScreen #fun_note {
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         margin-top: 1;
         margin-bottom: 1;
@@ -3989,12 +3989,12 @@ class BackupWalletSelectorScreen(WalletSelectorScreen):
     }
 
     BackupWalletSelectorScreen #select {
-        background: #f97316;
+        background: #c28756;
         color: white;
     }
 
     BackupWalletSelectorScreen #select:hover {
-        background: #ea580c;
+        background: #9f6f44;
         color: white;
     }
 
@@ -4043,7 +4043,7 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
 
     BackupMultiSelectorScreen #hint {
         margin-bottom: -1;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
     }
 
@@ -4074,12 +4074,12 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
     }
 
     BackupMultiSelectorScreen #backup_selected {
-        background: #f97316;
+        background: #c28756;
         color: white;
     }
 
     BackupMultiSelectorScreen #backup_selected:hover {
-        background: #ea580c;
+        background: #9f6f44;
         color: white;
     }
 
@@ -4094,7 +4094,7 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
 
     BackupMultiSelectorScreen #inp_pass:focus,
     BackupMultiSelectorScreen #inp_confirm:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     BackupMultiSelectorScreen #inp_backup_dir {
@@ -4105,7 +4105,7 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
     }
 
     BackupMultiSelectorScreen #inp_backup_dir:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     BackupMultiSelectorScreen #backup_dir_picker {
@@ -4258,7 +4258,7 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
 
     def _refresh_labels(self) -> None:
         for i, acc in enumerate(self.accounts):
-            mark = "[#eab308]■[/#eab308]" if i in self._selected else "[dim]□[/dim]"
+            mark = "[#c99c4d]■[/#c99c4d]" if i in self._selected else "[dim]□[/dim]"
             tag = " (watch)" if acc.enc is None else ""
             addr_short = acc.address[:10] + "…" + acc.address[-8:]
             self._labels[i].update(f"{mark} {acc.name}{tag} — {addr_short}")
@@ -4522,7 +4522,7 @@ class ReceiveScreen(ModalScreen[None]):
     }
 
     ReceiveScreen #fun_note {
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         margin-top: 0;
         margin-bottom: 0;
@@ -4550,7 +4550,7 @@ class ReceiveScreen(ModalScreen[None]):
         margin-bottom: 1;
         padding: 1;
         background: $boost;
-        border: solid #10b981;
+        border: solid #2ea676;
         align: left middle;
         height: auto;
         min-height: 3;
@@ -4860,7 +4860,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         max-height: 30;
         overflow-y: auto;
         background: $surface;
-        border: heavy #8b5cf6;
+        border: heavy #7b6cc4;
         padding: 1 2;
     }
 
@@ -4883,7 +4883,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
     }
 
     StakeScreen #fun_note {
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         margin-bottom: 1;
         padding: 0 1;
@@ -4933,7 +4933,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
     StakeScreen #amount_comment {
         margin-top: 0;
         margin-bottom: 1;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 1;
     }
@@ -4947,7 +4947,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
     }
 
     StakeScreen Input:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     StakeScreen #status_msg {
@@ -4970,42 +4970,42 @@ class StakeScreen(ModalScreen[Optional[dict]]):
     }
 
     StakeScreen #delegate_btn {
-        background: #f59e0b;
+        background: #bf9155;
         color: white;
     }
 
     StakeScreen #delegate_btn:hover {
-        background: #d97706;
+        background: #ad7f45;
         color: white;
     }
 
     StakeScreen #stake_btn {
-        background: #8b5cf6;
+        background: #7b6cc4;
         color: white;
     }
 
     StakeScreen #stake_btn:hover {
-        background: #7c3aed;
+        background: #6658aa;
         color: white;
     }
 
     StakeScreen #unstake_btn {
-        background: #8b5cf6;
+        background: #7b6cc4;
         color: white;
     }
 
     StakeScreen #unstake_btn:hover {
-        background: #7c3aed;
+        background: #6658aa;
         color: white;
     }
 
     StakeScreen #select_wallet_btn {
-        background: #10b981;
+        background: #2ea676;
         color: white;
     }
 
     StakeScreen #select_wallet_btn:hover {
-        background: #059669;
+        background: #257f62;
         color: white;
     }
     """
@@ -5074,7 +5074,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
 
     def _stake_selector_delegation_tag(self, delegate_addr: Optional[str]) -> str:
         if delegate_addr:
-            return "[yellow]Delegated[/yellow]"
+            return "[#d4a857]Delegated[/#d4a857]"
         return "[red]Not Delegated[/red]"
 
     def _format_stake_selector_row(
@@ -5089,8 +5089,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         addr_short = address[:10] + "…" + address[-8:]
         balance_xtz = mutez_to_xtz(max(0, int(balance_mutez or 0)))
         staked_xtz = mutez_to_xtz(max(0, int(staked_mutez or 0)))
-        balance_tag = f"[#34d399]{format_xtz(balance_xtz)} ꜩ[/#34d399]"
-        staked_tag = f"[#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
+        balance_tag = f"[#4bbf95]{format_xtz(balance_xtz)} ꜩ[/#4bbf95]"
+        staked_tag = f"[#7b6cc4]{format_xtz_precise(staked_xtz)} Staked[/#7b6cc4]"
         delegation_tag = self._stake_selector_delegation_tag(delegate_addr)
         return f"[b]{account_name}[/b] {balance_tag} {staked_tag}\n[dim]{addr_short}[/dim] {delegation_tag}"
 
@@ -5506,19 +5506,19 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     f"[b]Wallet name:[/b] {self.selected_account.name}",
                     f"[dim]{addr}[/dim]",
                     "",
-                    "[cyan]Balance[/cyan] 0 XTZ — time to grab some ꜩ and start the journey. 🥐",
+                    "[#8cb7c5]Balance[/#8cb7c5] 0 XTZ — time to grab some ꜩ and start the journey. 🥐",
                 ]
             else:
                 info_lines = [
                     f"[b]Wallet name:[/b] {self.selected_account.name}",
                     f"[dim]{addr}[/dim]",
                     "",
-                    f"[cyan]Available[/cyan] {available_xtz} XTZ   [#8b5cf6]Staked[/#8b5cf6] {staked_xtz} XTZ",
-                    f"[yellow]Delegated to[/yellow] {delegate_label}",
+                    f"[#8cb7c5]Available[/#8cb7c5] {available_xtz} XTZ   [#7b6cc4]Staked[/#7b6cc4] {staked_xtz} XTZ",
+                    f"[#d4a857]Delegated to[/#d4a857] {delegate_label}",
                 ]
                 if self.unstaked_mutez > 0:
                     info_lines.append(
-                        f"[yellow]Pending unstake[/yellow] {unstaked_xtz} XTZ (must finalize before new stake)"
+                        f"[#c39a56]Pending unstake[/#c39a56] {unstaked_xtz} XTZ (must finalize before new stake)"
                     )
 
             info_text = "\n".join(info_lines)
@@ -5561,8 +5561,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 input_field.disabled = False
                 if self.unstaked_mutez > 0 and self.staked_mutez <= 0:
                     input_hint.update(
-                        "[yellow]⏳ Pending unstake detected after baker change. "
-                        "You can stake again after finalization (~4 cycles).[/yellow]"
+                        "[#c39a56]⏳ Pending unstake detected after baker change. "
+                        "You can stake again after finalization (~4 cycles).[/#c39a56]"
                     )
                 else:
                     input_hint.update("")
@@ -5697,7 +5697,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             # Validating baker address
             is_valid, error_msg = validate_baker_address(value)
             if is_valid:
-                input_hint.update("[#34d399]✓ Valid baker address[/#34d399]")
+                input_hint.update("[#4bbf95]✓ Valid baker address[/#4bbf95]")
             else:
                 # Only show error if the address looks complete (36 chars)
                 if len(value) < 36:
@@ -5720,7 +5720,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             if is_valid and amount:
                 # Check against balance
                 if amount <= self.balance_xtz:
-                    input_hint.update("[#34d399]✓ Valid amount[/#34d399]")
+                    input_hint.update("[#4bbf95]✓ Valid amount[/#4bbf95]")
                     comment_widget = self.query_one("#amount_comment", Static)
                     if self.balance_xtz > 0:
                         pct = amount / self.balance_xtz
@@ -6232,7 +6232,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     "Enter Your Encryption Password",
                     password=True,
                     placeholder="Your wallet encryption password",
-                    wallet_info=f"[b cyan]Wallet:[/b cyan] {self.selected_account.name}",
+                    wallet_info=f"[b #8cb7c5]Wallet:[/b #8cb7c5] {self.selected_account.name}",
                     ok_label="Next →",
                     fun_note="Keep your keys safe. Never share this encryption password. 🔐🥖",
                     show_back_button=True,
@@ -6278,7 +6278,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     "Enter Your Encryption Password",
                     password=True,
                     placeholder="Your wallet encryption password",
-                    wallet_info=f"[b cyan]Wallet:[/b cyan] {self.selected_account.name}",
+                    wallet_info=f"[b #8cb7c5]Wallet:[/b #8cb7c5] {self.selected_account.name}",
                     ok_label="Next →",
                     fun_note=(
                         "Switching bakers is still a delegation op (but spicier). 🔁🥐"
@@ -6405,7 +6405,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             self.query_one("#status_msg", Static).update(
                 f"[red]❌ {title} failed[/red]\n"
                 f"[dim]{error_msg}[/dim]\n"
-                f"[yellow]Check logs/wallet.log for details[/yellow]"
+                f"[#d4a857]Check logs/wallet.log for details[/#d4a857]"
             )
         except _UI_CALLBACK_EXCEPTIONS as e:
             log_debug("Failed to update operation error message in modal", exception=str(e), title=title)
@@ -6442,11 +6442,11 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         app_status: str,
     ) -> None:
         self.query_one("#status_msg", Static).update(
-            f"[#34d399]✅ {modal_success}[/#34d399]\n"
+            f"[#4bbf95]✅ {modal_success}[/#4bbf95]\n"
             f"[dim]Operation: {op_hash}[/dim]"
         )
         self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
-        self.app._set_status(f"[#34d399]✅ {app_status}[/#34d399]")  # type: ignore[attr-defined]
+        self.app._set_status(f"[#4bbf95]✅ {app_status}[/#4bbf95]")  # type: ignore[attr-defined]
         self.app.call_later(self.app._refresh_account)  # type: ignore[attr-defined]
         self.call_later(lambda: self.dismiss(None))
 
@@ -6463,7 +6463,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         secret_key = await self._prompt_operation_secret(
             ok_label="✅ Delegate!",
             fun_note="Delegate like a boss! Your XTZ will thank you! 🎯",
-            cancel_status="[yellow]⏸️ Delegation cancelled[/yellow]",
+            cancel_status="[#d4a857]⏸️ Delegation cancelled[/#d4a857]",
         )
         if not secret_key:
             return
@@ -6476,7 +6476,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 return
 
             status_widget = self.query_one("#status_msg", Static)
-            status_widget.update("[yellow]⏳ Delegating... This may take a moment...[/yellow]")
+            status_widget.update("[#d4a857]⏳ Delegating... This may take a moment...[/#d4a857]")
             flow_start = time.time()
             self.app._ui(
                 self.app._start_breathing_effect,
@@ -6502,7 +6502,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
 
             await self._await_tx_flow_budget(flow_start)
 
-            status_widget.update(f"[#34d399]✅ Delegation sent![/#34d399]\n[dim]Op: {op_hash} Waiting for confirmation...[/dim]")
+            status_widget.update(f"[#4bbf95]✅ Delegation sent![/#4bbf95]\n[dim]Op: {op_hash} Waiting for confirmation...[/dim]")
             self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
 
             # Start spinner with baker-themed messages in main app
@@ -6545,7 +6545,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             secret_key = await self._prompt_operation_secret(
                 ok_label="💎 Stake!",
                 fun_note="Time to become a CHAD! Lock in that XTZ! 💪🔥",
-                cancel_status="[yellow]⏸️ Staking cancelled - encryption password not provided[/yellow]",
+                cancel_status="[#d4a857]⏸️ Staking cancelled - encryption password not provided[/#d4a857]",
             )
             if not secret_key:
                 return
@@ -6557,7 +6557,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 return
 
             status_widget = self.query_one("#status_msg", Static)
-            status_widget.update("[yellow]⏳ Staking... This may take a moment...[/yellow]")
+            status_widget.update("[#d4a857]⏳ Staking... This may take a moment...[/#d4a857]")
             flow_start = time.time()
             self.app._ui(
                 self.app._start_breathing_effect,
@@ -6602,7 +6602,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         secret_key = await self._prompt_operation_secret(
             ok_label="💸 Unstake!",
             fun_note="Time to unlock that XTZ! Freedom awaits! 🔓✨",
-            cancel_status="[yellow]⏸️ Unstaking cancelled[/yellow]",
+            cancel_status="[#d4a857]⏸️ Unstaking cancelled[/#d4a857]",
         )
         if not secret_key:
             return
@@ -6616,7 +6616,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 return
 
             status_widget = self.query_one("#status_msg", Static)
-            status_widget.update("[yellow]⏳ Unstaking... This may take a moment...[/yellow]")
+            status_widget.update("[#d4a857]⏳ Unstaking... This may take a moment...[/#d4a857]")
             flow_start = time.time()
             self.app._ui(
                 self.app._start_breathing_effect,
@@ -6689,13 +6689,13 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     # Update status
                     status_widget = self.query_one("#status_msg", Static)
                     status_widget.update(
-                        f"[#34d399]🎉 DELEGATION CONFIRMED! Staking unlocked! 💪[/#34d399]\n"
+                        f"[#4bbf95]🎉 DELEGATION CONFIRMED! Staking unlocked! 💪[/#4bbf95]\n"
                         f"[dim]You can now stake your XTZ![/dim]"
                     )
 
                     # Show success in main app
                     self.app._status_lock_until_refresh = True  # type: ignore[attr-defined]
-                    self.app._set_status("[#34d399]✅ Delegation confirmed! You can now stake your XTZ! 💪[/#34d399]", force=True)  # type: ignore[attr-defined]
+                    self.app._set_status("[#4bbf95]✅ Delegation confirmed! You can now stake your XTZ! 💪[/#4bbf95]", force=True)  # type: ignore[attr-defined]
 
                     # Update fun message
                     self._fun_message = get_modal_message("delegation_confirmed")
@@ -6792,7 +6792,7 @@ class TxDetailsScreen(ModalScreen[None]):
             if direction == "IN":
                 from_addr = cp
                 to_addr = self.wallet_address or "Your Wallet"
-                amt_label = f"[#34d399]+{format_xtz(amt)} XTZ[/#34d399]"
+                amt_label = f"[#4bbf95]+{format_xtz(amt)} XTZ[/#4bbf95]"
             elif direction == "OUT":
                 from_addr = self.wallet_address or "Your Wallet"
                 to_addr = cp
@@ -6870,7 +6870,7 @@ class ConfirmSendScreen(ModalScreen[dict]):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #10b981;
+        border: heavy #2ea676;
         padding: 1 2;
     }
 
@@ -6881,7 +6881,7 @@ class ConfirmSendScreen(ModalScreen[dict]):
     ConfirmSendScreen #confirm_comment {
         margin-top: 1;
         margin-bottom: 0;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 2;
     }
@@ -6915,7 +6915,7 @@ class ConfirmSendScreen(ModalScreen[dict]):
     ConfirmSendScreen #advanced_joke {
         margin-top: 1;
         margin-bottom: 0;
-        color: #f97316;
+        color: #c28756;
         text-style: bold italic;
         min-height: 2;
     }
@@ -6927,7 +6927,7 @@ class ConfirmSendScreen(ModalScreen[dict]):
     }
 
     ConfirmSendScreen Input:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     ConfirmSendScreen Horizontal {
@@ -7068,23 +7068,23 @@ class ConfirmSendScreen(ModalScreen[dict]):
             lines = [
                 "[b]Confirm transaction[/b]",
                 "",
-                f"[b cyan]Network:[/b cyan]   {net}",
+                f"[b #8cb7c5]Network:[/b #8cb7c5]   {net}",
                 "",
-                f"[b cyan]From:[/b cyan]      {self.from_addr}",
-                f"[b cyan]To:[/b cyan]        {self.to_addr}",
+                f"[b #8cb7c5]From:[/b #8cb7c5]      {self.from_addr}",
+                f"[b #8cb7c5]To:[/b #8cb7c5]        {self.to_addr}",
                 "",
-                f"[b cyan]Amount:[/b cyan]    {format_xtz(self.amount)} XTZ",
+                f"[b #8cb7c5]Amount:[/b #8cb7c5]    {format_xtz(self.amount)} XTZ",
             ]
         elif err:
             lines = [
                 "[b]Confirm transaction[/b]",
                 "",
-                f"[b cyan]Network:[/b cyan]   {net}",
+                f"[b #8cb7c5]Network:[/b #8cb7c5]   {net}",
                 "",
-                f"[b cyan]From:[/b cyan]      {self.from_addr}",
-                f"[b cyan]To:[/b cyan]        {self.to_addr}",
+                f"[b #8cb7c5]From:[/b #8cb7c5]      {self.from_addr}",
+                f"[b #8cb7c5]To:[/b #8cb7c5]        {self.to_addr}",
                 "",
-                f"[b cyan]Amount:[/b cyan]    {format_xtz(self.amount)} XTZ",
+                f"[b #8cb7c5]Amount:[/b #8cb7c5]    {format_xtz(self.amount)} XTZ",
                 "",
                 f"[red]Fee estimate failed:[/red] {err}",
                 "",
@@ -7095,12 +7095,12 @@ class ConfirmSendScreen(ModalScreen[dict]):
             lines = [
                 "[b]Confirm transaction[/b]",
                 "",
-                f"[b cyan]Network:[/b cyan]   {net}",
+                f"[b #8cb7c5]Network:[/b #8cb7c5]   {net}",
                 "",
-                f"[b cyan]From:[/b cyan]      {self.from_addr}",
-                f"[b cyan]To:[/b cyan]        {self.to_addr}",
+                f"[b #8cb7c5]From:[/b #8cb7c5]      {self.from_addr}",
+                f"[b #8cb7c5]To:[/b #8cb7c5]        {self.to_addr}",
                 "",
-                f"[b cyan]Amount:[/b cyan]    {format_xtz(self.amount)} XTZ",
+                f"[b #8cb7c5]Amount:[/b #8cb7c5]    {format_xtz(self.amount)} XTZ",
             ]
 
         self.query_one("#summary", Static).update("\n".join(lines))
@@ -7309,7 +7309,7 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #eab308;
+        border: heavy #c99c4d;
         padding: 1 2;
     }
 
@@ -7351,7 +7351,7 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
     ConfirmDelegateScreen #advanced_joke {
         margin-top: 1;
         margin-bottom: 0;
-        color: #f97316;
+        color: #c28756;
         text-style: bold italic;
         min-height: 2;
     }
@@ -7363,7 +7363,7 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
     }
 
     ConfirmDelegateScreen Input:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     ConfirmDelegateScreen Horizontal {
@@ -7481,19 +7481,19 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
 
         if estimating:
             lines = [
-                f"[b yellow]Network:[/b yellow]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b yellow]From:[/b yellow]      {self.from_addr}",
+                f"[b #d6ad79]From:[/b #d6ad79]      {self.from_addr}",
                 "",
-                f"[b yellow]To:[/b yellow]        {self._baker_label}",
+                f"[b #d6ad79]To:[/b #d6ad79]        {self._baker_label}",
             ]
         elif err:
             lines = [
-                f"[b yellow]Network:[/b yellow]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b yellow]From:[/b yellow]      {self.from_addr}",
+                f"[b #d6ad79]From:[/b #d6ad79]      {self.from_addr}",
                 "",
-                f"[b yellow]To:[/b yellow]        {self._baker_label}",
+                f"[b #d6ad79]To:[/b #d6ad79]        {self._baker_label}",
                 "",
                 f"[red]Fee estimate failed:[/red] {err}",
                 "",
@@ -7502,11 +7502,11 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
         else:
             # Simple summary (suggested limits moved to separate widget)
             lines = [
-                f"[b yellow]Network:[/b yellow]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b yellow]From:[/b yellow]      {self.from_addr}",
+                f"[b #d6ad79]From:[/b #d6ad79]      {self.from_addr}",
                 "",
-                f"[b yellow]To:[/b yellow]        {self._baker_label}",
+                f"[b #d6ad79]To:[/b #d6ad79]        {self._baker_label}",
             ]
 
         self.query_one("#summary", Static).update("\n".join(lines))
@@ -7596,7 +7596,7 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
             storage = int(tx.get("storage_limit") or 0)
 
             limits_text = [
-                f"[b cyan]Reveal:[/b cyan] {'yes (first send)' if reveal_needed else 'no'}",
+                f"[b #8cb7c5]Reveal:[/b #8cb7c5] {'yes (first send)' if reveal_needed else 'no'}",
                 "",
                 f"[dim]Suggested limits:[/dim] gas={gas}, storage={storage}",
                 "[dim]Tip:[/dim] use Economy/Normal/Priority, Advanced only if you know what you're doing.",
@@ -7686,7 +7686,7 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #eab308;
+        border: heavy #c99c4d;
         padding: 1 2;
     }
 
@@ -7728,7 +7728,7 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
     ConfirmChangeBakerScreen #advanced_joke {
         margin-top: 1;
         margin-bottom: 0;
-        color: #f97316;
+        color: #c28756;
         text-style: bold italic;
         min-height: 2;
     }
@@ -7740,7 +7740,7 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
     }
 
     ConfirmChangeBakerScreen Input:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     ConfirmChangeBakerScreen Horizontal {
@@ -7815,25 +7815,25 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
         net = network_from_rpc(self.rpc)
         if estimating:
             lines = [
-                f"[b yellow]Network:[/b yellow]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b yellow]From:[/b yellow]      {self.from_addr}",
+                f"[b #d6ad79]From:[/b #d6ad79]      {self.from_addr}",
                 "",
-                f"[b yellow]Current:[/b yellow]   {self._current_baker_label}",
+                f"[b #d6ad79]Current:[/b #d6ad79]   {self._current_baker_label}",
                 "",
-                f"[b yellow]New:[/b yellow]       {self._new_baker_label}",
+                f"[b #d6ad79]New:[/b #d6ad79]       {self._new_baker_label}",
                 "",
                 "[dim]Note:[/dim] Existing staked tez moves to unstaking until finalization.",
             ]
         elif err:
             lines = [
-                f"[b yellow]Network:[/b yellow]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b yellow]From:[/b yellow]      {self.from_addr}",
+                f"[b #d6ad79]From:[/b #d6ad79]      {self.from_addr}",
                 "",
-                f"[b yellow]Current:[/b yellow]   {self._current_baker_label}",
+                f"[b #d6ad79]Current:[/b #d6ad79]   {self._current_baker_label}",
                 "",
-                f"[b yellow]New:[/b yellow]       {self._new_baker_label}",
+                f"[b #d6ad79]New:[/b #d6ad79]       {self._new_baker_label}",
                 "",
                 f"[red]Fee estimate failed:[/red] {err}",
                 "",
@@ -7843,13 +7843,13 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
             ]
         else:
             lines = [
-                f"[b yellow]Network:[/b yellow]   {net}",
+                f"[b #d6ad79]Network:[/b #d6ad79]   {net}",
                 "",
-                f"[b yellow]From:[/b yellow]      {self.from_addr}",
+                f"[b #d6ad79]From:[/b #d6ad79]      {self.from_addr}",
                 "",
-                f"[b yellow]Current:[/b yellow]   {self._current_baker_label}",
+                f"[b #d6ad79]Current:[/b #d6ad79]   {self._current_baker_label}",
                 "",
-                f"[b yellow]New:[/b yellow]       {self._new_baker_label}",
+                f"[b #d6ad79]New:[/b #d6ad79]       {self._new_baker_label}",
                 "",
                 "[dim]Note:[/dim] Existing staked tez moves to unstaking until finalization.",
             ]
@@ -7885,7 +7885,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
         max-height: 36;
         overflow-y: hidden;
         background: $surface;
-        border: heavy #10b981;
+        border: heavy #2ea676;
         padding: 1 2;
     }
 
@@ -7922,7 +7922,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
     }
 
     SendScreen Input:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     SendScreen #hint_text {
@@ -7954,7 +7954,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
     SendScreen #amount_comment {
         margin-top: 0;
         margin-bottom: 1;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 1;
     }
@@ -8044,7 +8044,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
             recent_addr = self.recent_to[0]
             if recent_addr and recent_addr != from_addr:
                 recent_short = f"{recent_addr[:10]}...{recent_addr[-8:]}"
-                label_text = f"💡 [b cyan]Last used:[/b cyan] {recent_short}"
+                label_text = f"💡 [b #8cb7c5]Last used:[/b #8cb7c5] {recent_short}"
                 dest_lv.append(ListItem(Label(label_text, markup=True)))
                 self._quick_destination_addrs.append(recent_addr)
 
@@ -8095,9 +8095,9 @@ class SendScreen(ModalScreen[Optional[dict]]):
                     self._balance_cache[acc.address] = balance_xtz
                 balance_str = format_xtz(balance_xtz)
                 if balance_xtz <= 0:
-                    label_text = f"[b]{acc.name}[/b] [#34d399]{balance_str} XTZ[/#34d399] [#f97316]NEW WALLET[/#f97316]\n[dim]{addr_short}[/dim]"
+                    label_text = f"[b]{acc.name}[/b] [#4bbf95]{balance_str} XTZ[/#4bbf95] [#c28756]NEW WALLET[/#c28756]\n[dim]{addr_short}[/dim]"
                 else:
-                    label_text = f"[b]{acc.name}[/b] [#34d399]{balance_str} XTZ[/#34d399]\n[dim]{addr_short}[/dim]"
+                    label_text = f"[b]{acc.name}[/b] [#4bbf95]{balance_str} XTZ[/#4bbf95]\n[dim]{addr_short}[/dim]"
 
                 # Update list item
                 self.app._ui(self._update_send_wallet_row, idx, label_text)
@@ -8229,7 +8229,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
         if not is_valid:
             self._set_hint(f"[red]✗ {error_msg}[/red]")
         else:
-            self._set_hint("[#34d399]✓ Address looks valid[/#34d399]")
+            self._set_hint("[#4bbf95]✓ Address looks valid[/#4bbf95]")
 
     @on(Input.Submitted, "#to_input")
     async def to_submitted(self, event: Input.Submitted) -> None:
@@ -8407,7 +8407,7 @@ class DestinationPickerScreen(ModalScreen[str]):
         height: auto;
         max-height: 30;
         background: $surface;
-        border: heavy #10b981;
+        border: heavy #2ea676;
         padding: 1 2;
     }
 
@@ -8423,13 +8423,13 @@ class DestinationPickerScreen(ModalScreen[str]):
     }
 
     #dest_inp:focus {
-        border: solid #10b981;
+        border: solid #2ea676;
     }
 
     #sassy_comment {
         margin-top: 1;
         margin-bottom: 0;
-        color: #fbbf24;
+        color: #d4a857;
         text-style: italic;
         min-height: 2;
     }
@@ -8555,7 +8555,7 @@ class DestinationPickerScreen(ModalScreen[str]):
         # Validate address
         is_valid, error_msg = validate_tezos_address(value, allow_kt1=True)
         if is_valid:
-            self._set_dest_hint("[#34d399]✓ Valid Tezos address[/#34d399]")
+            self._set_dest_hint("[#4bbf95]✓ Valid Tezos address[/#4bbf95]")
             # Show a sassy comment when address is valid
             self._set_sassy_comment(f"[dim italic]{get_recipient_comment()}[/dim italic]")
         else:
@@ -8564,7 +8564,7 @@ class DestinationPickerScreen(ModalScreen[str]):
             if len(value) >= 36:
                 self._set_dest_hint(f"[red]✗ {error_msg}[/red]")
             elif len(value) > 3:
-                self._set_dest_hint("[yellow]⏳ Enter complete address (36 characters)...[/yellow]")
+                self._set_dest_hint("[#d4a857]⏳ Enter complete address (36 characters)...[/#d4a857]")
             else:
                 self._set_dest_hint("")
 
@@ -8664,7 +8664,7 @@ class WalletApp(App):
 
     Input > .input--cursor {
         color: #ffffff;
-        background: #10b981;
+        background: #2ea676;
     }
 
     Input > .input--placeholder {
@@ -8758,7 +8758,7 @@ class WalletApp(App):
         content-align: right middle;
         margin-left: 2;
         padding-right: 1;
-        color: #a855f7;
+        color: #8f77c7;
         text-style: italic;
     }
 
@@ -8777,14 +8777,14 @@ class WalletApp(App):
 
     #backup {
         width: auto;
-        background: #eab308;
+        background: #c99c4d;
         color: white;
         content-align: center middle;
         margin-right: 1;
     }
 
     #backup:hover {
-        background: #ca8a04;
+        background: #a97f3f;
         color: white;
     }
 
@@ -8934,13 +8934,13 @@ class WalletApp(App):
     }
 
     #send {
-        background: #10b981;
+        background: #2ea676;
         color: white;
         margin-right: 1;
     }
 
     #send:hover {
-        background: #059669;
+        background: #257f62;
         color: white;
     }
 
@@ -8956,23 +8956,23 @@ class WalletApp(App):
     }
 
     #stake {
-        background: #8b5cf6;
+        background: #7b6cc4;
         color: white;
         margin-right: 1;
     }
 
     #stake:hover {
-        background: #7c3aed;
+        background: #6658aa;
         color: white;
     }
 
     #refresh {
-        background: #f97316;
+        background: #c28756;
         color: white;
     }
 
     #refresh:hover {
-        background: #ea580c;
+        background: #9f6f44;
         color: white;
     }
 
@@ -9087,24 +9087,24 @@ class WalletApp(App):
         min-width: 18;
         padding: 0 1;
         text-align: right;
-        color: #16a34a;
+        color: #3e9967;
         text-style: bold;
         background: $boost;
     }
 
     /* Status bar states with glow effects */
     #bottom_bar.status-success {
-        border: heavy #16a34a;
+        border: heavy #3e9967;
         background: #0f1f16;
     }
 
     #bottom_bar.status-warning {
-        border: heavy #ca8a04;
+        border: heavy #a97f3f;
         background: #2a1f0a;
     }
 
     #bottom_bar.status-warning-dim {
-        border: heavy #a16207;
+        border: heavy #8d6a3b;
         background: #241c0f;
     }
 
@@ -9120,47 +9120,47 @@ class WalletApp(App):
 
     /* Stake/Unstake: higher-contrast pulse so the blink is obvious in terminals. */
     #bottom_bar.status-stake {
-        border: heavy #a855f7;
+        border: heavy #8f77c7;
         background: #240a38;
     }
 
     #bottom_bar.status-unstake {
-        border: heavy #a855f7;
+        border: heavy #8f77c7;
         background: #2a0b3f;
     }
 
     #bottom_bar.status-stake-dim {
-        border: heavy #6d28d9;
+        border: heavy #554798;
         background: #14061f;
     }
 
     #bottom_bar.status-unstake-dim {
-        border: heavy #6d28d9;
+        border: heavy #554798;
         background: #14061f;
     }
 
     #status_line.status-success {
-        color: #22c55e;
+        color: #4abf7a;
         background: #0f1f16;
     }
 
     #bottom_bar.status-success-dim {
-        border: heavy #15803d;
+        border: heavy #327a55;
         background: #0b1a12;
     }
 
     #status_line.status-success-dim {
-        color: #16a34a;
+        color: #3e9967;
         background: #0b1a12;
     }
 
     #status_line.status-warning {
-        color: #eab308;
+        color: #c99c4d;
         background: #2a1f0a;
     }
 
     #status_line.status-warning-dim {
-        color: #ca8a04;
+        color: #a97f3f;
         background: #241c0f;
     }
 
@@ -9175,43 +9175,43 @@ class WalletApp(App):
     }
 
     #status_line.status-stake {
-        color: #f5d0fe;
+        color: #d6c8ea;
         background: #240a38;
     }
 
     #status_line.status-unstake {
-        color: #f5d0fe;
+        color: #d6c8ea;
         background: #2a0b3f;
     }
 
     #status_line.status-stake-dim {
-        color: #c084fc;
+        color: #9f8acb;
         background: #14061f;
     }
 
     #status_line.status-unstake-dim {
-        color: #c084fc;
+        color: #9f8acb;
         background: #14061f;
     }
 
     /* Processing state with yellow glow (breathing effect handled by timer) */
     #bottom_bar.status-processing {
-        border: heavy #d97706;
+        border: heavy #ad7f45;
         background: #2a210f;
     }
 
     #status_line.status-processing {
-        color: #f59e0b;
+        color: #bf9155;
         background: #2a210f;
     }
 
     #bottom_bar.status-processing-dim {
-        border: heavy #b45309;
+        border: heavy #8d6a3b;
         background: #241c0f;
     }
 
     #status_line.status-processing-dim {
-        color: #d97706;
+        color: #ad7f45;
         background: #241c0f;
     }
     """
@@ -9856,7 +9856,7 @@ class WalletApp(App):
         try:
             if self._rpc_online:
                 blink = (self._rpc_pulse_i % 2) == 0
-                dot = "[#34d399]●[/#34d399]" if blink else "[#22c55e]●[/#22c55e]"
+                dot = "[#4bbf95]●[/#4bbf95]" if blink else "[#4abf7a]●[/#4abf7a]"
             else:
                 dot = "[red]●[/red]"
             self.query_one("#rpc_indicator", Static).update(f"{dot} {self._rpc_short or 'RPC'}")
@@ -10538,7 +10538,7 @@ class WalletApp(App):
             wallet_name = str(getattr(self.selected, "name", "") or "").strip()
         if wallet_name:
             wallet_name = wallet_name.replace("[", "\\[").replace("]", "\\]")
-            return f"[cyan]{wallet_name}[/cyan] · [b]Oven Log[/b] (last {self.history_limit} fresh goodies){suffix}"
+            return f"[#8cb7c5]{wallet_name}[/#8cb7c5] · [b]Oven Log[/b] (last {self.history_limit} fresh goodies){suffix}"
         else:
             return f"[dim]no wallet selected[/dim] · [b]Oven Log[/b] (last {self.history_limit} fresh goodies){suffix}"
 
@@ -10594,7 +10594,7 @@ class WalletApp(App):
         if direction == "IN":
             from_addr = cp
             to_addr = wallet_addr or "Your Wallet"
-            amt_label = f"[#34d399]+{format_xtz(amt)} XTZ[/#34d399]"
+            amt_label = f"[#4bbf95]+{format_xtz(amt)} XTZ[/#4bbf95]"
         elif direction == "OUT":
             from_addr = wallet_addr or "Your Wallet"
             to_addr = cp
@@ -10602,19 +10602,19 @@ class WalletApp(App):
         elif direction == "STK":
             from_addr = wallet_addr or "Your Wallet"
             to_addr = wallet_addr or "Your Wallet"
-            amt_label = f"[#8b5cf6]-{format_xtz(amt)} XTZ[/#8b5cf6]"
+            amt_label = f"[#7b6cc4]-{format_xtz(amt)} XTZ[/#7b6cc4]"
         elif direction == "UST":
             from_addr = wallet_addr or "Your Wallet"
             to_addr = wallet_addr or "Your Wallet"
-            amt_label = f"[#8b5cf6]+{format_xtz(amt)} XTZ[/#8b5cf6]"
+            amt_label = f"[#7b6cc4]+{format_xtz(amt)} XTZ[/#7b6cc4]"
         elif direction == "DEL":
             from_addr = wallet_addr or "Your Wallet"
             to_addr = cp
-            amt_label = f"[yellow]{format_xtz(amt)} XTZ[/yellow]"
+            amt_label = f"[#d4a857]{format_xtz(amt)} XTZ[/#d4a857]"
         elif direction == "UND":
             from_addr = wallet_addr or "Your Wallet"
             to_addr = "—"
-            amt_label = f"[yellow]{format_xtz(amt)} XTZ[/yellow]"
+            amt_label = f"[#d4a857]{format_xtz(amt)} XTZ[/#d4a857]"
         else:
             from_addr = "?"
             to_addr = "?"
@@ -10838,7 +10838,7 @@ class WalletApp(App):
             self._loading_accounts.clear()
             self._stop_loading_anim()
             # Show a fun motivational message from the library
-            lv.append(ListItem(Label(f"[yellow]{self._empty_wallet_message}[/yellow]", markup=True)))
+            lv.append(ListItem(Label(f"[#d4a857]{self._empty_wallet_message}[/#d4a857]", markup=True)))
             return
 
         for idx, a in enumerate(self.accounts, start=1):
@@ -11026,7 +11026,7 @@ class WalletApp(App):
     def _update_status_balance(self) -> None:
         if not self.selected:
             # Show labels only with placeholder values
-            label_color = "#fdba74"
+            label_color = "#d6ad79"
             self.query_one("#wallet_status", Static).update(
                 f"[b][{label_color}]Wallet:[/{label_color}][/b] -"
             )
@@ -11044,7 +11044,7 @@ class WalletApp(App):
             )
             return
 
-        label_color = "#fdba74"
+        label_color = "#d6ad79"
         wallet_tag = " [dim](watch-only)[/dim]" if self.selected.enc is None else ""
         self.query_one("#wallet_status", Static).update(
             f"[b][{label_color}]Wallet:[/{label_color}][/b] [b]{self.selected.name}[/b]{wallet_tag}"
@@ -11061,7 +11061,7 @@ class WalletApp(App):
         net = network_from_rpc(self.rpc)
         net_label = "Mainnet" if net == "mainnet" else "Ghostnet"
         self.query_one("#wallet_network", Static).update(
-            f"[b][{label_color}]Network:[/{label_color}][/b] [#34d399]●[/#34d399] {net_label}"
+            f"[b][{label_color}]Network:[/{label_color}][/b] [#4bbf95]●[/#4bbf95] {net_label}"
         )
         self._fetch_selected_status(self.selected.address)
 
@@ -11099,13 +11099,13 @@ class WalletApp(App):
     ) -> None:
         if not self.selected or self.selected.address != address:
             return
-        label_color = "#fdba74"
+        label_color = "#d6ad79"
         balance_xtz = mutez_to_xtz(bal)
         is_staking = staking_bal > 0
         is_delegating = delegate is not None
         self._balance_message = get_balance_message(balance_xtz, is_staking, is_delegating)
         self.query_one("#wallet_balance", Static).update(
-            f"[b][{label_color}]Balance:[/{label_color}][/b] [b]{format_xtz(balance_xtz)} XTZ[/b] [cyan]{self._balance_message}[/cyan]"
+            f"[b][{label_color}]Balance:[/{label_color}][/b] [b]{format_xtz(balance_xtz)} XTZ[/b] [#8cb7c5]{self._balance_message}[/#8cb7c5]"
         )
 
         if delegate:
@@ -11115,10 +11115,10 @@ class WalletApp(App):
                 baker_display = baker_info.get('alias') or delegate
                 delegation_text = (
                     f"[b][{label_color}]Delegated to:[/{label_color}][/b] "
-                    f"[cyan]{baker_display}[/cyan] - {commentary_short}"
+                    f"[#8cb7c5]{baker_display}[/#8cb7c5] - {commentary_short}"
                 )
             else:
-                delegation_text = f"[b][{label_color}]Delegated to:[/{label_color}][/b] [cyan]{delegate}[/cyan]"
+                delegation_text = f"[b][{label_color}]Delegated to:[/{label_color}][/b] [#8cb7c5]{delegate}[/#8cb7c5]"
             self.query_one("#wallet_delegation", Static).update(delegation_text)
         else:
             self.query_one("#wallet_delegation", Static).update(
@@ -11128,12 +11128,12 @@ class WalletApp(App):
         if staking_bal > 0:
             self._staking_message = get_staking_message("chad")
             self.query_one("#wallet_staking", Static).update(
-                f"[b][{label_color}]Staked Balance:[/{label_color}][/b] [b]{format_xtz(mutez_to_xtz(staking_bal))} XTZ[/b] [#34d399]{self._staking_message}[/#34d399]"
+                f"[b][{label_color}]Staked Balance:[/{label_color}][/b] [b]{format_xtz(mutez_to_xtz(staking_bal))} XTZ[/b] [#4bbf95]{self._staking_message}[/#4bbf95]"
             )
         elif delegate:
             self._staking_message = get_staking_message("boring")
             self.query_one("#wallet_staking", Static).update(
-                f"[b][{label_color}]Staked Balance:[/{label_color}][/b] [dim]-[/dim] [yellow]{self._staking_message}[/yellow]"
+                f"[b][{label_color}]Staked Balance:[/{label_color}][/b] [dim]-[/dim] [#c39a56]{self._staking_message}[/#c39a56]"
             )
         else:
             self._staking_message = get_staking_message("lazy")
@@ -11144,7 +11144,7 @@ class WalletApp(App):
     def _apply_selected_status_error(self, address: str, err: str) -> None:
         if not self.selected or self.selected.address != address:
             return
-        label_color = "#fdba74"
+        label_color = "#d6ad79"
         self.query_one("#wallet_balance", Static).update(
             f"[b][{label_color}]Balance:[/{label_color}][/b] error: {err}"
         )
@@ -11267,19 +11267,19 @@ class WalletApp(App):
 
         amt_formatted = format_xtz(amt)
         if direction == "IN":
-            amt_str = f"[#34d399]{f'+{amt_formatted} XTZ':<15}[/#34d399]"
+            amt_str = f"[#4bbf95]{f'+{amt_formatted} XTZ':<15}[/#4bbf95]"
         elif direction == "OUT":
             amt_str = f"[red]{f'-{amt_formatted} XTZ':<15}[/red]"
         elif direction == "STK":
-            amt_str = f"[#8b5cf6]{f'+{amt_formatted} XTZ':<15}[/#8b5cf6]"
+            amt_str = f"[#7b6cc4]{f'+{amt_formatted} XTZ':<15}[/#7b6cc4]"
         elif direction == "UST":
-            amt_str = f"[#8b5cf6]{f'-{amt_formatted} XTZ':<15}[/#8b5cf6]"
+            amt_str = f"[#7b6cc4]{f'-{amt_formatted} XTZ':<15}[/#7b6cc4]"
         elif direction == "DEL":
-            amt_str = f"[yellow]{f'---':<15}[/yellow]"
+            amt_str = f"[#d4a857]{f'---':<15}[/#d4a857]"
         elif direction == "UND":
-            amt_str = f"[yellow]{f'---':<15}[/yellow]"
+            amt_str = f"[#d4a857]{f'---':<15}[/#d4a857]"
         elif direction == "BAK":
-            amt_str = f"[yellow]{f'---':<15}[/yellow]"
+            amt_str = f"[#d4a857]{f'---':<15}[/#d4a857]"
         else:
             amt_str = f"{f'{amt_formatted} XTZ':<15}"
 
@@ -11297,9 +11297,9 @@ class WalletApp(App):
             type_raw = "TX"
 
         if type_raw in ("DLG", "CH"):
-            type_text = f"[yellow]{type_raw:<4}[/yellow]"
+            type_text = f"[#d4a857]{type_raw:<4}[/#d4a857]"
         elif type_raw in ("STK", "USTK"):
-            type_text = f"[#8b5cf6]{type_raw:<4}[/#8b5cf6]"
+            type_text = f"[#7b6cc4]{type_raw:<4}[/#7b6cc4]"
         else:
             type_text = f"{type_raw:<4}"
 
@@ -11359,7 +11359,7 @@ class WalletApp(App):
         elif status == "PROCESSING":
             status_color = "yellow"
         elif direction in ("STK", "UST"):
-            status_color = "#8b5cf6"
+            status_color = "#7b6cc4"
         elif direction in ("DEL", "UND"):
             status_color = "yellow"
         elif direction in ("IN", "OUT"):
@@ -12185,7 +12185,7 @@ class WalletApp(App):
             "🥐 The croissants just fluffed. Your call.",
         ]
         line = secrets.choice(exit_lines)
-        message = f"[b #f59e0b]{line}[/b #f59e0b]\n\nAre you sure you want to exit?"
+        message = f"[b #bf9155]{line}[/b #bf9155]\n\nAre you sure you want to exit?"
         confirmed = await self.push_screen_wait(
             ExitConfirmScreen(
                 message,
@@ -12359,7 +12359,7 @@ class WalletApp(App):
                             "Enter Your Encryption Password",
                             password=True,
                             placeholder="Your wallet encryption password",
-                            wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
+                            wallet_info=f"[b #8cb7c5]Wallet:[/b #8cb7c5] {account.name}",
                             ok_label="Next →",
                             fun_note="Keep your keys safe. Never share this encryption password. 🔐🥖",
                             show_back_button=True,
@@ -12673,7 +12673,7 @@ class WalletApp(App):
                             "Enter Your Encryption Password",
                             password=True,
                             placeholder="Your wallet encryption password",
-                            wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
+                            wallet_info=f"[b #8cb7c5]Wallet:[/b #8cb7c5] {account.name}",
                             ok_label="Next →",
                             fun_note="Keep your keys safe. Never share this encryption password. 🔐🥖",
                             show_back_button=True,
@@ -12968,7 +12968,7 @@ class WalletApp(App):
                         "Enter Your Encryption Password",
                         password=True,
                         placeholder="Your wallet encryption password",
-                        wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
+                        wallet_info=f"[b #8cb7c5]Wallet:[/b #8cb7c5] {account.name}",
                         ok_label="Next →",
                         fun_note="Delegate like a boss! Your XTZ will thank you! 🎯",
                         show_back_button=True,
@@ -13209,7 +13209,7 @@ class WalletApp(App):
                         "Enter Your Encryption Password",
                         password=True,
                         placeholder="Your wallet encryption password",
-                        wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
+                        wallet_info=f"[b #8cb7c5]Wallet:[/b #8cb7c5] {account.name}",
                         ok_label="Next →",
                         fun_note="Switching bakers is still a delegation op (but spicier). 🔁🥐",
                         show_back_button=True,
@@ -13661,8 +13661,8 @@ class WalletApp(App):
             ConfirmScreen(
                 f"Delete {count} wallet(s)?\n\n"
                 f"[dim]{names}{more}[/dim]\n\n"
-                f"[yellow]⚠️ This will burn the wallet(s) out of the app.[/yellow]\n"
-                f"[yellow]No unburning. 🔥🍞[/yellow]\n\n"
+                f"[#d4a857]⚠️ This will burn the wallet(s) out of the app.[/#d4a857]\n"
+                f"[#d4a857]No unburning. 🔥🍞[/#d4a857]\n\n"
                 f"[dim](This only removes local data, not on-chain)[/dim]",
                 title="🔥 Burn Wallets?",
                 yes_label="Burn It! 🔥",
@@ -14230,7 +14230,7 @@ class WalletApp(App):
                         "📝 Confirm/Rename Wallet",
                         placeholder=name,
                         ok_label="🥖 Import!",
-                        wallet_info=f"[b cyan]Original:[/b cyan] {name} | [b cyan]Address:[/b cyan] {addr[:10]}...{addr[-8:]}",
+                        wallet_info=f"[b #8cb7c5]Original:[/b #8cb7c5] {name} | [b #8cb7c5]Address:[/b #8cb7c5] {addr[:10]}...{addr[-8:]}",
                         fun_note="Keep the name or give it a fresh label!",
                     )
                 )
