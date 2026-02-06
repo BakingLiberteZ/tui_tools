@@ -13492,7 +13492,7 @@ class WalletApp(App):
             self._set_busy(False)
             if pre_change_staked_mutez > 0:
                 self._set_status_styled_locked(
-                    "✅ Baker changed. Previous stake is now unstaking; restake after finalization.",
+                    "✅ Baker changed. Existing stake is now redelegating to the new baker.",
                     style="warning",
                 )
             else:
