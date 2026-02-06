@@ -91,13 +91,20 @@
 - Backup import security bounds and malformed payload handling.
 - RPC fallback safety behavior.
 - Send/delegate/stake flow edge cases and regressions.
+- Stake flow worker isolation + overlapping submit guard regressions.
 
 ## Current Validation Baseline
 
-- `pytest -q`: passing (`48 passed, 1 skipped` in latest run).
+- `pytest -q`: passing (`52 passed, 1 skipped` in latest run).
 - `bandit -r sassy_wallet -ll -ii`: clean.
 - `scripts/check_dependency_policy.py`: passing.
 - `pip-audit` full online query depends on network availability; enforced in CI `security-audit.yml`.
+
+## Stake Flow Reliability Notes (2026-02-06)
+
+- Fixed a stake-flow reliability regression where the stake modal could be left without an active owner worker and the payload was not dispatched.
+- `WalletApp.action_stake()` now starts `_run_stake_flow` in a dedicated worker group (`stake-flow`) to avoid cancellation collisions with unrelated exclusive workers.
+- `StakeScreen.stake_pressed()` now has an in-screen reentry guard to prevent overlapping submits from event/key bounce while confirmation is still in progress.
 
 ## Key Commits (Recent)
 

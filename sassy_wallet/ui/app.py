@@ -150,6 +150,7 @@ _STATUS_STYLE_CLASSES = (
 )
 _FEE_CHOICES = ("economy", "normal", "priority")
 _FEE_LABELS = ("Economy", "Normal", "Priority")
+_STAKE_FLOW_WORKER_GROUP = "stake-flow"
 _IMPORT_TYPE_OPTIONS = (
     ("mnemonic12", "🧠 Import with 12 Words", "Default derivation"),
     ("mnemonic24", "🧠 Import with 24 Words", "Default derivation"),
@@ -5035,6 +5036,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         self._initial_ctx = initial_ctx or {}
         self._wallet_selector_target_index: int = 0
         self._stake_status_grace_seconds: float = 180.0
+        self._stake_action_in_progress: bool = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="stake_root"):
@@ -5937,31 +5939,38 @@ class StakeScreen(ModalScreen[Optional[dict]]):
     @on(Button.Pressed, "#stake_btn")
     async def stake_pressed(self) -> None:
         """Handle staking action."""
+        if self._stake_action_in_progress:
+            log_info(
+                "StakeScreen stake_pressed ignored (already in progress)",
+                selected_address=getattr(self.selected_account, "address", ""),
+            )
+            return
+        self._stake_action_in_progress = True
         log_info(
             "StakeScreen stake_pressed",
             selected_address=getattr(self.selected_account, "address", ""),
         )
-        if not self.selected_account:
-            self._show_error("⚠️ Select a wallet first.")
-            return
-        await self._refresh_selected_chain_state(force_refresh=True, preserve_input=True)
-        if not self.is_delegated:
-            self._show_error("⚠️ Wallet is not delegated. Delegate (or change baker) first.")
-            return
-
-        has_outgoing = self._has_outgoing_activity(self.selected_account.address)
-        if self.balance_xtz <= 0 or not has_outgoing:
-            self._show_error(_STAKE_OUTGOING_REQUIRED_MSG)
-            return
-
-        amount = self._read_validated_amount(
-            empty_message="⚠️ Please enter amount",
-            max_value=self.balance_xtz,
-        )
-        if amount is None:
-            return
-
         try:
+            if not self.selected_account:
+                self._show_error("⚠️ Select a wallet first.")
+                return
+            await self._refresh_selected_chain_state(force_refresh=True, preserve_input=True)
+            if not self.is_delegated:
+                self._show_error("⚠️ Wallet is not delegated. Delegate (or change baker) first.")
+                return
+
+            has_outgoing = self._has_outgoing_activity(self.selected_account.address)
+            if self.balance_xtz <= 0 or not has_outgoing:
+                self._show_error(_STAKE_OUTGOING_REQUIRED_MSG)
+                return
+
+            amount = self._read_validated_amount(
+                empty_message="⚠️ Please enter amount",
+                max_value=self.balance_xtz,
+            )
+            if amount is None:
+                return
+
             if not await self._confirm_pending_ops_or_abort(
                 cancel_message="⏸️ Staking cancelled - waiting for pending operations",
                 detailed=False,
@@ -6016,6 +6025,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             log_error("Stake flow failed in modal", exception=ex)
             self._show_error(f"⚠️ Staking failed: {str(ex)}")
             return
+        finally:
+            self._stake_action_in_progress = False
 
     @work(exclusive=True)
     @on(Button.Pressed, "#unstake_btn")
@@ -12155,7 +12166,12 @@ class WalletApp(App):
         self._status_lock_until_refresh = False
 
         try:
-            self.run_worker(self._run_stake_flow, exclusive=False, thread=False)
+            self.run_worker(
+                self._run_stake_flow,
+                group=_STAKE_FLOW_WORKER_GROUP,
+                exclusive=False,
+                thread=False,
+            )
         except _UI_CALLBACK_EXCEPTIONS as e:
             self._stake_flow_in_progress = False
             log_error("Failed to start stake flow worker", exception=e)

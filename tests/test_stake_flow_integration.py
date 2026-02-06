@@ -76,6 +76,91 @@ def test_stake_flow_double_attempt_keeps_context_and_blocks_race():
     assert shown_errors == []
 
 
+def test_stake_flow_ignores_overlapping_submit_attempts():
+    """
+    Regression: overlapping stake submissions from event bounce must not run twice.
+    """
+    account = Account(
+        name="Primary",
+        address="tz1SOURCE11111111111111111111111111111",
+        enc=None,
+    )
+    screen = StakeScreen(accounts=[account], rpc="https://rpc.tzkt.io/mainnet")
+    screen.selected_account = account
+    screen.balance_xtz = Decimal("10")
+    screen.is_delegated = True
+
+    dismissed_payloads: list[dict] = []
+    confirm_calls: list[Decimal] = []
+    release_confirm = asyncio.Event()
+
+    async def _refresh_selected_chain_state(force_refresh=False, preserve_input=False):
+        return True
+
+    async def _confirm_pending_ops_or_abort(*, cancel_message: str, detailed: bool = False) -> bool:
+        return True
+
+    async def _confirm_stake_flow(*, amount, cancel_message, confirm_screen_factory):
+        confirm_calls.append(amount)
+        await release_confirm.wait()
+        return object(), {"fee_mutez": 1234, "gas_limit": 2222, "storage_limit": 0}
+
+    def _dismiss_stake_action(action: str, **kwargs):
+        payload = {"action": action, **kwargs}
+        dismissed_payloads.append(payload)
+
+    screen._refresh_selected_chain_state = _refresh_selected_chain_state
+    screen._has_outgoing_activity = lambda address: True
+    screen._read_validated_amount = lambda **kwargs: Decimal("1")
+    screen._confirm_pending_ops_or_abort = _confirm_pending_ops_or_abort
+    screen._confirm_stake_flow = _confirm_stake_flow
+    screen._dismiss_stake_action = _dismiss_stake_action
+
+    async def _run() -> None:
+        t1 = asyncio.create_task(screen.stake_pressed())
+        await asyncio.sleep(0)
+        t2 = asyncio.create_task(screen.stake_pressed())
+        await asyncio.sleep(0)
+        release_confirm.set()
+        await asyncio.gather(t1, t2)
+
+    asyncio.run(_run())
+
+    assert len(confirm_calls) == 1
+    assert len(dismissed_payloads) == 1
+    assert dismissed_payloads[0]["action"] == "stake"
+
+
+def test_action_stake_runs_in_dedicated_worker_group():
+    """Regression: stake flow worker must not share the default worker group."""
+    class Dummy:
+        pass
+
+    app = Dummy()
+    app._stake_flow_in_progress = False
+    app._breathing_active = False
+    app._tx_watchdog_token = None
+    app._status_lock_until_refresh = False
+    app._set_status = lambda *args, **kwargs: None
+    app._set_status_styled = lambda *args, **kwargs: None
+    app._run_stake_flow = lambda: None
+    worker_calls: list[dict] = []
+
+    def _run_worker(work, **kwargs):
+        worker_calls.append({"work": work, **kwargs})
+        return None
+
+    app.run_worker = _run_worker
+
+    app_mod.WalletApp.action_stake(app)
+
+    assert app._stake_flow_in_progress is True
+    assert len(worker_calls) == 1
+    assert worker_calls[0]["group"] == "stake-flow"
+    assert worker_calls[0]["exclusive"] is False
+    assert worker_calls[0]["thread"] is False
+
+
 def test_open_stake_flow_anchors_source_wallet_before_dispatch(monkeypatch):
     """When StakeScreen returns payload, app should focus source wallet before action handler runs."""
     account = Account(
