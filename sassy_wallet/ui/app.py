@@ -13176,6 +13176,8 @@ class WalletApp(App):
         new_baker_address = stake_data.get("baker_address")
         current_baker_address = stake_data.get("current_baker") or ""
         pre_change_staked_mutez = 0
+        pre_change_unstaked_mutez = 0
+        pre_change_staking_active = False
 
         if not account or not new_baker_address:
             log_error("Invalid change_baker data received", stake_data=stake_data)
@@ -13193,6 +13195,8 @@ class WalletApp(App):
             )
             chain_current = state.get("delegate") or ""
             pre_change_staked_mutez = int(state.get("staked_mutez") or 0)
+            pre_change_unstaked_mutez = int(state.get("unstaked_mutez") or 0)
+            pre_change_staking_active = bool(state.get("staking_active")) or pre_change_staked_mutez > 0 or pre_change_unstaked_mutez > 0
             if chain_current:
                 current_baker_address = chain_current
         except _FLOW_PRECHECK_EXCEPTIONS as e:
@@ -13205,13 +13209,15 @@ class WalletApp(App):
         # Empirically on current protocol/RPC paths this operation repeatedly fails with
         # gas_exhausted when there is active stake. Short-circuit early with clear guidance
         # instead of making the user wait through long multi-RPC retries.
-        if pre_change_staked_mutez > 0:
+        if pre_change_staking_active:
             staked_xtz = format_xtz(mutez_to_xtz(pre_change_staked_mutez))
+            unstaked_xtz = format_xtz(mutez_to_xtz(pre_change_unstaked_mutez))
+            stake_state = f"staked={staked_xtz} XTZ, pending_unstake={unstaked_xtz} XTZ"
             self._status_lock_until_refresh = False
             self._stop_breathing_effect()
             self._set_busy(False)
             self._set_status_styled(
-                f"❌ Cannot change baker while {staked_xtz} XTZ is actively staked. "
+                f"❌ Cannot change baker while staking state is active ({stake_state}). "
                 "Unstake first, wait inclusion, then change baker.",
                 style="error",
                 duration=8.0,
