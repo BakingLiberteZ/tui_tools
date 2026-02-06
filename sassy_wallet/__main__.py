@@ -1,11 +1,11 @@
 """Entry point for Sassy Wallet CLI application."""
 
-import sys
-from sassy_wallet.ui.app import WalletApp
+from sassy_wallet.ui.app import WalletApp, setup_logging
 
 
 def main():
     """Main entry point for the application."""
+    setup_logging()
     app = WalletApp()
     app.run()
 

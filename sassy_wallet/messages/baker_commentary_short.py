@@ -4,7 +4,7 @@ Short baker commentary messages for main screen display.
 Provides concise, impactful messages for the main wallet view.
 """
 
-import random
+import secrets
 from decimal import Decimal
 from typing import Optional
 from .baker_commentary import get_baker_tier, TIER_MICRO, TIER_SMALL, TIER_MEDIUM, TIER_LARGE, TIER_VERY_LARGE, TIER_WHALE
@@ -108,4 +108,4 @@ def get_baker_commentary_short(baker_balance_xtz: Optional[Decimal]) -> str:
         return "[dim]Unknown tier[/dim]"
 
     # Randomly select one of the messages for this tier
-    return random.choice(messages)
+    return secrets.choice(messages)

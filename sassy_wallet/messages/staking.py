@@ -10,7 +10,7 @@ Message Categories:
 - 😂 LAZY: Not delegating and not staking (come on, help the network!)
 """
 
-import random
+import secrets
 from typing import Literal
 
 # ============================================================================
@@ -116,7 +116,7 @@ def get_staking_message(context: StakingContext) -> str:
     }
 
     messages = messages_map.get(context, STAKING_LAZY)
-    return random.choice(messages)
+    return secrets.choice(messages)
 
 
 # ============================================================================

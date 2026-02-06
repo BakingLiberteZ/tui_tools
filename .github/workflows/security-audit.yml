@@ -1,0 +1,74 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Resolve lockfile
+      run: |
+        uv lock
+
+    - name: Install dependencies
+      run: |
+        uv sync --dev --frozen
+
+    - name: Dependency policy gate
+      run: |
+        python scripts/check_dependency_policy.py
+
+    - name: Generate Bandit JSON report
+      run: |
+        uv run bandit -r sassy_wallet -f json -o bandit-report.json || true
+
+    - name: Generate pip-audit JSON report
+      run: |
+        uv run pip-audit -l -f json -o pip-audit-report.json || true
+
+    - name: Generate dependency SBOM
+      run: |
+        uv run pip-audit -l -f cyclonedx-json -o dependency-sbom.cdx.json || true
+
+    - name: Upload security reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-reports-${{ github.run_id }}
+        path: |
+          bandit-report.json
+          pip-audit-report.json
+          dependency-sbom.cdx.json
+        if-no-files-found: warn
+
+    - name: Bandit gate (medium/high confidence)
+      run: |
+        uv run bandit -r sassy_wallet -ll -ii
+
+    - name: Dependency vulnerability gate
+      run: |
+        uv run pip-audit -l

@@ -7,11 +7,82 @@ exposing sensitive information or stack traces to the user.
 import logging
 import functools
 import traceback
+import os
+import re
+from logging.handlers import RotatingFileHandler
 from typing import Callable, TypeVar, Any, Optional
 from pathlib import Path
 
 # Type variable for generic function decoration
 F = TypeVar('F', bound=Callable[..., Any])
+_PRIVATE_FILE_MODE = 0o600
+_PRIVATE_DIR_MODE = 0o700
+_TEZOS_ADDR_RE = re.compile(r"\b(?:tz[1-4]|KT1)[1-9A-HJ-NP-Za-km-z]{33}\b")
+_TEZOS_OPH_RE = re.compile(r"\bo[1-9A-HJ-NP-Za-km-z]{50}\b")
+_TEZOS_SK_RE = re.compile(r"\b(?:edsk|edesk)[1-9A-HJ-NP-Za-km-z]{20,}\b")
+_TEZOS_SIG_RE = re.compile(r"\bsig[1-9A-HJ-NP-Za-km-z]{20,}\b")
+_LONG_HEX_RE = re.compile(r"\b[0-9a-fA-F]{64,}\b")
+
+
+def _chmod_best_effort(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except (OSError, PermissionError):
+        return
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Redact common sensitive blockchain values from logs."""
+    if not text:
+        return text
+    redacted = str(text)
+    redacted = _TEZOS_ADDR_RE.sub("<tezos-address:redacted>", redacted)
+    redacted = _TEZOS_OPH_RE.sub("<operation-hash:redacted>", redacted)
+    redacted = _TEZOS_SK_RE.sub("<secret-key:redacted>", redacted)
+    redacted = _TEZOS_SIG_RE.sub("<signature:redacted>", redacted)
+    redacted = _LONG_HEX_RE.sub("<hex:redacted>", redacted)
+    return redacted
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v) for v in value)
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    if isinstance(value, set):
+        return {_redact_value(v) for v in value}
+    return value
+
+
+class _RedactingFilter(logging.Filter):
+    """Filter that redacts sensitive values from every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        record.msg = _redact_value(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact_value(v) for v in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: _redact_value(v) for k, v in record.args.items()}
+        return True
+
+
+class _SecureRotatingFileHandler(RotatingFileHandler):
+    """Rotating handler that enforces private file permissions."""
+
+    def _open(self):  # type: ignore[override]
+        stream = super()._open()
+        _chmod_best_effort(Path(self.baseFilename), _PRIVATE_FILE_MODE)
+        return stream
+
+    def doRollover(self) -> None:  # type: ignore[override]
+        super().doRollover()
+        _chmod_best_effort(Path(self.baseFilename), _PRIVATE_FILE_MODE)
+        for i in range(1, self.backupCount + 1):
+            _chmod_best_effort(Path(f"{self.baseFilename}.{i}"), _PRIVATE_FILE_MODE)
 
 
 def setup_logger(name: str = "wallet", log_file: str = "logs/wallet.log", level: int = logging.INFO) -> logging.Logger:
@@ -30,22 +101,28 @@ def setup_logger(name: str = "wallet", log_file: str = "logs/wallet.log", level:
 
     # Avoid duplicate handlers if called multiple times
     if logger.handlers:
+        if not any(isinstance(f, _RedactingFilter) for f in logger.filters):
+            logger.addFilter(_RedactingFilter())
         return logger
 
     logger.setLevel(level)
 
     # Create logs directory if it doesn't exist
     log_path = Path(log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIR_MODE)
+    _chmod_best_effort(log_path.parent, _PRIVATE_DIR_MODE)
 
     # File handler with rotation
-    from logging.handlers import RotatingFileHandler
-    file_handler = RotatingFileHandler(
+    file_handler = _SecureRotatingFileHandler(
         log_file,
         maxBytes=10 * 1024 * 1024,  # 10MB
         backupCount=5,
         encoding='utf-8'
     )
+    file_handler.addFilter(_RedactingFilter())
+    _chmod_best_effort(log_path, _PRIVATE_FILE_MODE)
+    for i in range(1, file_handler.backupCount + 1):
+        _chmod_best_effort(Path(f"{log_file}.{i}"), _PRIVATE_FILE_MODE)
     file_handler.setLevel(level)
     file_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s',
@@ -53,6 +130,7 @@ def setup_logger(name: str = "wallet", log_file: str = "logs/wallet.log", level:
     )
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
+    logger.addFilter(_RedactingFilter())
 
     # Prevent propagation to root logger (which might have StreamHandler)
     logger.propagate = False
@@ -67,6 +145,28 @@ _logger = setup_logger()
 def get_logger() -> logging.Logger:
     """Get the global wallet logger instance."""
     return _logger
+
+
+def _format_wrapped_exception_message(
+    *,
+    user_message: str,
+    func_name: str,
+    exception: BaseException,
+    arg_count: int,
+    kwarg_count: int,
+) -> str:
+    return (
+        f"{user_message}: {type(exception).__name__}: {str(exception)}\n"
+        f"Function: {func_name}\n"
+        f"ArgCount: {arg_count} Positional, {kwarg_count} Keyword\n"
+        f"Traceback:\n{traceback.format_exc()}"
+    )
+
+
+def _format_exception_traceback(exception: BaseException | None = None) -> str:
+    if exception and exception.__traceback__:
+        return "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+    return traceback.format_exc()
 
 
 def log_exception(
@@ -102,10 +202,13 @@ def log_exception(
                 logger = get_logger()
                 logger.log(
                     log_level,
-                    f"{user_message}: {type(e).__name__}: {str(e)}\n"
-                    f"Function: {func.__name__}\n"
-                    f"Args: {args[:2] if args else 'none'}...\n"  # Limit args to avoid logging sensitive data
-                    f"Traceback:\n{traceback.format_exc()}"
+                    _format_wrapped_exception_message(
+                        user_message=user_message,
+                        func_name=func.__name__,
+                        exception=e,
+                        arg_count=len(args),
+                        kwarg_count=len(kwargs),
+                    )
                 )
 
                 if reraise:
@@ -149,10 +252,13 @@ def safe_log_exception(
                 logger = get_logger()
                 logger.log(
                     log_level,
-                    f"{user_message}: {type(e).__name__}: {str(e)}\n"
-                    f"Function: {func.__name__}\n"
-                    f"Args: {args[:2] if args else 'none'}...\n"
-                    f"Traceback:\n{traceback.format_exc()}"
+                    _format_wrapped_exception_message(
+                        user_message=user_message,
+                        func_name=func.__name__,
+                        exception=e,
+                        arg_count=len(args),
+                        kwarg_count=len(kwargs),
+                    )
                 )
 
                 # Return default value
@@ -181,7 +287,7 @@ def log_warning(message: str, **context: Any) -> None:
         logger.warning(message)
 
 
-def log_error(message: str, exception: Optional[Exception] = None, **context: Any) -> None:
+def log_error(message: str, exception: Optional[BaseException] = None, **context: Any) -> None:
     """
     Log an error message with optional exception and context.
 
@@ -202,7 +308,7 @@ def log_error(message: str, exception: Optional[Exception] = None, **context: An
     logger.error(msg)
 
     if exception:
-        logger.debug(f"Traceback:\n{traceback.format_exc()}")
+        logger.debug(f"Traceback:\n{_format_exception_traceback(exception)}")
 
 
 def log_debug(message: str, **context: Any) -> None:

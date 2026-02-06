@@ -3,7 +3,7 @@ Sassy and funny commentary for the Send flow.
 Provides contextual comments based on recipient, amount, and confirmation stage.
 """
 
-import random
+import secrets
 from decimal import Decimal
 
 # ============================================================================
@@ -34,7 +34,7 @@ RECIPIENT_COMMENTS = [
 
 def get_recipient_comment() -> str:
     """Get a random sassy comment about the recipient."""
-    return random.choice(RECIPIENT_COMMENTS)
+    return secrets.choice(RECIPIENT_COMMENTS)
 
 
 # ============================================================================
@@ -57,7 +57,7 @@ def get_amount_comment(amount: Decimal) -> str:
 
     if amount < Decimal("0.1"):
         # Micro amounts - very sarcastic
-        return random.choice([
+        return secrets.choice([
             "Is this for real? That won't even buy a digital gum. ¬¬ 🍬",
             "Sending dust particles, are we? Very generous. ¬¬ ✨",
             "Wow, big spender! Don't break the bank! ¬¬ 💸",
@@ -70,7 +70,7 @@ def get_amount_comment(amount: Decimal) -> str:
 
     elif amount < Decimal("1"):
         # Tiny amounts (0.1 - 1 XTZ) - sarcastic
-        return random.choice([
+        return secrets.choice([
             "That won't buy a coffee, but hey, it's the thought! ¬¬ ☕",
             "Sending breadcrumbs? The baker wants a word. ¬¬ 🍞",
             "Small but mighty... well, mostly small. ¬¬ 🐜",
@@ -82,7 +82,7 @@ def get_amount_comment(amount: Decimal) -> str:
 
     elif amount < Decimal("10"):
         # Small amounts (1 - 10 XTZ) - slightly sarcastic
-        return random.choice([
+        return secrets.choice([
             "That won't buy a sandwich with cheese, but nice try! ¬¬ 🥪",
             "Respectable amount! Not impressive, but respectable. 👍",
             "Enough for a snack, maybe two if on sale. ¬¬ 🍕",
@@ -95,7 +95,7 @@ def get_amount_comment(amount: Decimal) -> str:
 
     elif amount < Decimal("100"):
         # Medium amounts (10 - 100 XTZ) - positive with hints of sass
-        return random.choice([
+        return secrets.choice([
             "Now we're talking! This is getting interesting. 🎯",
             "Nice! Someone's getting a proper gift. 🎁",
             "Ooh, fancy! Breaking out the good stuff. ✨",
@@ -108,7 +108,7 @@ def get_amount_comment(amount: Decimal) -> str:
 
     elif amount < Decimal("1000"):
         # Large amounts (100 - 1000 XTZ) - impressed
-        return random.choice([
+        return secrets.choice([
             "This is serious business! Big moves here. 💼",
             "Whoa! Someone's making it rain Tezos! 🌧️💰",
             "Major transaction alert! This is legit. 🚨",
@@ -121,7 +121,7 @@ def get_amount_comment(amount: Decimal) -> str:
 
     else:
         # Whale amounts (>= 1000 XTZ) - extremely impressed/shocked
-        return random.choice([
+        return secrets.choice([
             "WHALE ALERT! 🐋 This is MASSIVE!",
             "Holy Tezos! Are you buying a house or what?! 🏠",
             "This is SERIOUS money! Triple-check everything! 💰💰💰",
@@ -148,7 +148,7 @@ def get_confirmation_comment(amount: Decimal) -> str:
 
     if amount < Decimal("5"):
         # Low amounts - casual, dismissive, sarcastic
-        return random.choice([
+        return secrets.choice([
             "Nah, we don't need to verify anything. If lost, it's only a few tez anyway. ¬¬ 🤷",
             "Send it! What's the worst that could happen? It's peanuts. ¬¬ 🥜",
             "Go ahead, click SEND. No need to think twice about this. ¬¬ ✅",
@@ -161,7 +161,7 @@ def get_confirmation_comment(amount: Decimal) -> str:
 
     elif amount < Decimal("50"):
         # Medium amounts - balanced tone with light sarcasm
-        return random.choice([
+        return secrets.choice([
             "Double-check the address? Maybe? Up to you! ¬¬ 🤔",
             "Looks good! Send when ready. Probably. ¬¬ 👍",
             "Everything seems fine. Probably fine. Maybe check once more? ¬¬ 😅",
@@ -174,7 +174,7 @@ def get_confirmation_comment(amount: Decimal) -> str:
 
     elif amount < Decimal("500"):
         # High amounts - more serious, genuinely concerned
-        return random.choice([
+        return secrets.choice([
             "Hold on! Are you 100% sure about this? There's no undo button! ⚠️",
             "This is serious! Double-check EVERYTHING before sending! 🔍",
             "⚠️ WARNING: This is a significant amount. Verify the address! ⚠️",
@@ -187,7 +187,7 @@ def get_confirmation_comment(amount: Decimal) -> str:
 
     else:
         # Whale amounts - VERY serious, panic mode
-        return random.choice([
+        return secrets.choice([
             "🚨 STOP! Are you 100% ABSOLUTELY CERTAIN? This is A LOT of money! 🚨",
             "⛔ RED ALERT! Verify EVERYTHING! There is NO UNDO for this! ⛔",
             "🛑 HALT! This is SERIOUS money! Triple-check the address! 🛑",

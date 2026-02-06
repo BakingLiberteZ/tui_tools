@@ -20,9 +20,33 @@ A terminal wallet that **doesn’t hide the knobs**. You learn Tezos by doing Te
 ## Install
 
 ```bash
-pip install -r requirements.txt
-python -m sassy_wallet
+uv venv
+uv lock
+uv sync --dev
+uv run python -m sassy_wallet
+# or: uv run sassy-wallet
 ```
+
+## Quality checks
+
+```bash
+python scripts/check_dependency_policy.py
+uv run ruff check . --fix
+uv run ruff format .
+uv run ty check
+uv run bandit -r sassy_wallet -ll -ii
+uv run pip-audit -l
+```
+
+## Data location
+
+- Store lives at `~/.local/share/sassy-wallet/wallet.json` (XDG on Linux).
+- Override with `SASSY_WALLET_STORE_PATH` (full file path) or `SASSY_WALLET_DATA_DIR` (directory).
+- Legacy `data/wallet.json` is migrated once and kept as a backup.
+
+## Security
+
+- Security policy and reporting workflow: `SECURITY.md`
 
 ## V2 ideas (wishlist)
 

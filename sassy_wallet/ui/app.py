@@ -1,9 +1,13 @@
 from __future__ import annotations
 from decimal import Decimal
+from datetime import datetime, timezone
 import asyncio
 import decimal
 import re
 import threading
+import concurrent.futures
+import queue
+import os
 from threading import RLock
 from functools import lru_cache
 import urllib.request
@@ -12,21 +16,34 @@ import time
 import json
 import webbrowser
 import logging
-import subprocess
+# Clipboard integration intentionally uses explicit OS clipboard helpers.
+import subprocess  # nosec B404
 import shutil
 from pathlib import Path
 from typing import Any, Callable, Optional
+from cryptography.exceptions import InvalidTag
 
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Header, Footer, ListView, ListItem, Label, Button, Input, Static, DirectoryTree, Tree
+from textual.css.query import NoMatches, WrongType
+from textual.widgets import Footer, ListView, ListItem, Label, Button, Input, Static, DirectoryTree, Tree
 from textual.events import MouseDown, MouseUp
 
-from sassy_wallet.core.store import load_store, save_store, list_accounts, upsert_account, Account
-from sassy_wallet.core.crypto import encrypt_secret, decrypt_secret
+from sassy_wallet.core.store import (
+    load_store,
+    save_store,
+    list_accounts,
+    upsert_account,
+    get_last_migration,
+    ensure_private_dir,
+    ensure_private_files_in_dir,
+    write_private_json_atomic,
+    Account,
+)
+from sassy_wallet.core.crypto import encrypt_secret, decrypt_secret, EncryptedBlob
 from sassy_wallet.core.tezos import (
     get_balance_mutez,
     mutez_to_xtz,
@@ -42,15 +59,23 @@ from sassy_wallet.core.tezos import (
     estimate_unstake,
     get_delegation_info,
     get_staking_balance,
+    get_wallet_chain_state,
     get_baker_info,
-    get_baker_staking_balance,
-    get_public_bakers,
+    has_outgoing_tx,
     delegate_to_baker,
     stake_xtz,
     unstake_xtz,
     is_revealed,
+    check_pending_operations,
 )
-from sassy_wallet.core.logger import log_exception, safe_log_exception, log_error, log_info, log_warning, log_debug
+from sassy_wallet.core.logger import (
+    safe_log_exception,
+    log_error,
+    log_info,
+    log_warning,
+    log_debug,
+    setup_logger,
+)
 from sassy_wallet.core.validation import (
     validate_baker_address,
     validate_tezos_address,
@@ -59,111 +84,83 @@ from sassy_wallet.core.validation import (
     validate_gas_limit,
     validate_storage_limit,
     sanitize_input,
-    is_valid_tezos_address,
-    is_valid_baker_address,
+    normalize_https_url,
+    normalize_rpc_url,
 )
-from sassy_wallet.messages.bakery import get_message, SPINNER_MESSAGES, BAKER_MESSAGES, get_baker_message, get_wallet_loading_message
+from sassy_wallet.messages.bakery import get_message, SPINNER_MESSAGES, get_baker_message, get_wallet_loading_message
 from sassy_wallet.messages.staking import get_staking_message
 from sassy_wallet.messages.empty_wallet import get_empty_wallet_message
 from sassy_wallet.messages.balance import get_balance_message
 from sassy_wallet.messages.modal import get_modal_message
-from sassy_wallet.messages.baker_commentary import (
-    get_baker_commentary,
-    get_baker_tier_emoji,
-    format_baker_balance_info,
-    should_show_decentralization_warning,
-    get_decentralization_recommendation,
-)
 from sassy_wallet.messages.baker_commentary_short import get_baker_commentary_short
 from sassy_wallet.messages.send_commentary import get_recipient_comment, get_amount_comment, get_confirmation_comment
 from sassy_wallet.messages.send_status import get_send_baked_message
 from sassy_wallet.messages.advanced_mode import get_advanced_mode_message
+from sassy_wallet.ui.input_utils import (
+    filter_amount_input,
+    filter_base58_input,
+    filter_digits_input,
+    shimmer_text,
+    filter_mnemonic_input,
+    filter_derivation_path,
+)
 
+BACK_NAV_MARKER = "__BACK__"
 
-# Amount inputs: digits + one dot, up to 6 decimals (XTZ precision)
-def filter_amount_input(value: str, *, max_decimals: int = 6) -> str:
-    if value is None:
-        return ""
-    raw = str(value)
-    if raw == "":
-        return ""
-    out_chars: list[str] = []
-    dot_seen = False
-    for ch in raw:
-        if ch.isdigit():
-            out_chars.append(ch)
-        elif ch == "." and not dot_seen:
-            out_chars.append(ch)
-            dot_seen = True
-    filtered = "".join(out_chars)
-    if not filtered:
-        return ""
-    if filtered.startswith("."):
-        filtered = "0" + filtered
-    if "." in filtered:
-        left, right = filtered.split(".", 1)
-        filtered = left + "." + right[:max_decimals]
-    return filtered
-
-
-_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-
-
-def filter_base58_input(value: str) -> str:
-    if value is None:
-        return ""
-    raw = str(value)
-    return "".join(ch for ch in raw if ch in _BASE58_ALPHABET)
-
-
-def filter_digits_input(value: str) -> str:
-    if value is None:
-        return ""
-    raw = str(value)
-    return "".join(ch for ch in raw if ch.isdigit())
-
-
-def shimmer_text(text: str, offset: int, span: int = 2, *, pingpong: bool = False) -> str:
-    if not text:
-        return text
-    n = len(text)
-    if pingpong and n > 1:
-        period = 2 * (n - 1)
-        pos = offset % period
-        if pos >= n:
-            pos = period - pos
-        start = pos
-    else:
-        start = offset % n
-    end = start + max(1, span)
-    parts: list[str] = []
-    for i, ch in enumerate(text):
-        if pingpong:
-            in_span = start <= i < min(end, n)
-        else:
-            in_span = (start <= i < end) or (end > n and i < (end - n))
-        if in_span:
-            parts.append(f"[reverse]{ch}[/reverse]")
-        else:
-            parts.append(ch)
-    return "".join(parts)
-
-
-def filter_mnemonic_input(value: str) -> str:
-    if value is None:
-        return ""
-    raw = str(value).lower()
-    filtered = "".join(ch for ch in raw if ch.isalpha() or ch.isspace())
-    return filtered
-
-
-def filter_derivation_path(value: str) -> str:
-    if value is None:
-        return ""
-    raw = str(value)
-    allowed = set("mM/0123456789'")
-    filtered = "".join(ch for ch in raw if ch in allowed)
-    return filtered.replace("M", "m")
+_FLOW_PRECHECK_EXCEPTIONS = (
+    RuntimeError,
+    ValueError,
+    TypeError,
+    ConnectionError,
+    TimeoutError,
+    urllib.error.URLError,
+)
+_UI_CALLBACK_EXCEPTIONS = (
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    IndexError,
+)
+_FLOW_TASK_EXCEPTIONS = _FLOW_PRECHECK_EXCEPTIONS + _UI_CALLBACK_EXCEPTIONS + (asyncio.CancelledError,)
+_UI_QUERY_EXCEPTIONS = _UI_CALLBACK_EXCEPTIONS + (NoMatches, WrongType)
+_LOCAL_IO_EXCEPTIONS = (OSError, PermissionError)
+_NUMERIC_PARSE_EXCEPTIONS = (ValueError, TypeError, decimal.InvalidOperation)
+_CRYPTO_DECODE_EXCEPTIONS = (
+    InvalidTag,
+    ValueError,
+    TypeError,
+    KeyError,
+    json.JSONDecodeError,
+)
+_STATUS_STYLE_CLASSES = (
+    "status-success",
+    "status-success-dim",
+    "status-warning",
+    "status-warning-dim",
+    "status-error",
+    "status-info",
+    "status-stake",
+    "status-stake-dim",
+    "status-unstake",
+    "status-unstake-dim",
+    "status-processing",
+    "status-processing-dim",
+)
+_FEE_CHOICES = ("economy", "normal", "priority")
+_FEE_LABELS = ("Economy", "Normal", "Priority")
+_IMPORT_TYPE_OPTIONS = (
+    ("mnemonic12", "🧠 Import with 12 Words", "Default derivation"),
+    ("mnemonic24", "🧠 Import with 24 Words", "Default derivation"),
+    ("secret", "🔑 Import with Secret Key", "Full wallet - can send & receive"),
+    ("watch", "👀 Watch-Only Address", "Monitor only - cannot send"),
+    ("backup", "📦 From Backup File", "Restore from recipe book"),
+)
+_STAKE_OUTGOING_REQUIRED_MSG = (
+    "⚠️ You need a positive balance and at least one outgoing transfer "
+    "before you can delegate or stake."
+)
 
 
 # --- Configuration constants ---
@@ -227,7 +224,9 @@ class Config:
     STATUS_BLINK_INTERVAL_SECONDS = 0.4
     PRICE_REFRESH_SECONDS = 60.0
     PRICE_INITIAL_DELAY_SECONDS = 5.0
-    SEND_FAILSAFE_SECONDS = 30.0
+    # Send keeps a dedicated failsafe to avoid leaving the UI "locked" forever.
+    # Keep it >= hard RPC timeout to avoid false positives on slow injections.
+    SEND_FAILSAFE_SECONDS = 180.0
 
     # Baker search
     BAKER_SEARCH_MAX_DEPTH = 20
@@ -253,6 +252,16 @@ class Config:
     PENDING_TX_ASSUME_OK_SECONDS = TX_FLOW_TOTAL_SECONDS
     PENDING_TX_VERIFY_SECONDS = 60.0
     PENDING_TX_PROCESSING_SECONDS = 60.0
+    # UI/network timeouts:
+    # - TX_RPC_TIMEOUT_SECONDS: "soft" timeout (show a "still working" notice).
+    # - TX_RPC_HARD_TIMEOUT_SECONDS: hard timeout (treat as failure for UX; op may still land later).
+    TX_RPC_TIMEOUT_SECONDS = 30.0
+    TX_RPC_HARD_TIMEOUT_SECONDS = 180.0
+
+    # Backup import bounds (defense-in-depth against oversized/corrupted files).
+    BACKUP_MAX_FILE_BYTES = 2 * 1024 * 1024
+    BACKUP_MAX_DECRYPTED_BYTES = 4 * 1024 * 1024
+    BACKUP_MAX_ACCOUNTS = 200
 
 
 # --- Address validation (simple + fast) ---
@@ -271,6 +280,31 @@ def is_kt1_address(addr: str) -> bool:
 def is_tezos_destination(addr: str) -> bool:
     a = (addr or "").strip()
     return is_tz_address(a) or is_kt1_address(a)
+
+
+def _focus_with_fallback(
+    owner: Any,
+    *,
+    primary: tuple[str, type],
+    fallbacks: tuple[tuple[str, type], ...],
+    primary_error: str,
+    fallback_error: str,
+) -> None:
+    """Focus primary widget, then try fallbacks if needed."""
+    primary_selector, primary_type = primary
+    try:
+        owner.query_one(primary_selector, primary_type).focus()
+        return
+    except _UI_QUERY_EXCEPTIONS as primary_exc:
+        log_error(primary_error, exception=primary_exc)
+    prior_exc = primary_exc
+    for selector, widget_type in fallbacks:
+        try:
+            owner.query_one(selector, widget_type).focus()
+            return
+        except _UI_QUERY_EXCEPTIONS as fallback_exc:
+            prior_exc = fallback_exc
+    log_debug(fallback_error, exception=str(prior_exc), prior_exception=str(primary_exc))
 
 
 @lru_cache(maxsize=1)
@@ -296,46 +330,37 @@ def tzkt_api_base_from_rpc(rpc: str) -> str:
     return Config.TZKT_API_GHOSTNET if network_from_rpc(rpc) == "ghostnet" else Config.TZKT_API_MAINNET
 
 
+def _normalize_rpc_runtime(rpc: str | None, *, fallback: str) -> tuple[str, bool]:
+    """
+    Normalize an RPC URL for runtime usage.
+
+    Returns:
+        (normalized_rpc, was_replaced)
+    """
+    candidate = (rpc or "").strip()
+    try:
+        normalized = normalize_rpc_url(candidate)
+    except ValueError:
+        return fallback, bool(candidate)
+    return normalized, normalized != candidate
+
+
 def _xtz_to_mutez(x: Decimal) -> int:
     return int((x * Decimal(1_000_000)).to_integral_value())
 
 
 def setup_logging() -> None:
     """Configure application logging with rotation."""
-    from logging.handlers import RotatingFileHandler
+    wallet_logger = setup_logger(name="wallet", log_file=Config.LOG_FILE, level=Config.LOG_LEVEL)
 
-    # Create logs directory if it doesn't exist
-    log_path = Path(Config.LOG_FILE)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Configure root logger
+    # Keep root logger aligned so direct `logging.info(...)` calls in this module
+    # follow the same file rotation policy as core logger helpers.
     logger = logging.getLogger()
     logger.setLevel(Config.LOG_LEVEL)
-
-    # Remove existing handlers
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
-
-    # File handler with rotation (NO console handler - breaks Textual UI)
-    file_handler = RotatingFileHandler(
-        Config.LOG_FILE,
-        maxBytes=Config.LOG_MAX_BYTES,
-        backupCount=Config.LOG_BACKUP_COUNT,
-        encoding='utf-8'
-    )
-    file_handler.setLevel(Config.LOG_LEVEL)
-
-    # Formatter
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    file_handler.setFormatter(formatter)
-
-    # Add ONLY file handler (no console output to avoid breaking Textual UI)
-    logger.addHandler(file_handler)
-
-    # Prevent propagation to root logger (which might have StreamHandler)
+    for handler in wallet_logger.handlers:
+        logger.addHandler(handler)
     logger.propagate = False
 
     logging.info("=" * 60)
@@ -360,6 +385,361 @@ def format_xtz(amount: Decimal) -> str:
     return formatted
 
 
+def format_xtz_precise(amount: Decimal, *, min_decimals: int = 3, max_decimals: int = 6) -> str:
+    """Format XTZ with a stable number of decimals for tiny balances (e.g. stake display in lists)."""
+    try:
+        if min_decimals < 0:
+            min_decimals = 0
+        if max_decimals < min_decimals:
+            max_decimals = min_decimals
+        formatted = f"{amount:,.{max_decimals}f}"
+    except _NUMERIC_PARSE_EXCEPTIONS:
+        # Fallback to existing formatter
+        return format_xtz(amount)
+    if "." not in formatted:
+        return formatted
+    whole, frac = formatted.split(".", 1)
+    frac = frac.rstrip("0")
+    if len(frac) < min_decimals:
+        frac = frac.ljust(min_decimals, "0")
+    if frac:
+        return f"{whole}.{frac}"
+    return whole
+
+
+def _fee_choice_from_index(index: int, default: str = "normal") -> str:
+    if 0 <= index < len(_FEE_CHOICES):
+        return _FEE_CHOICES[index]
+    return default if default in _FEE_CHOICES else "normal"
+
+
+def _fee_index_from_choice(choice: str) -> int:
+    try:
+        return _FEE_CHOICES.index(choice)
+    except ValueError:
+        return 1
+
+
+def _selected_option_id(index: Optional[int], options: tuple[tuple[str, str, str], ...]) -> Optional[str]:
+    if index is None or index < 0 or index >= len(options):
+        return None
+    return options[index][0]
+
+
+def _selected_value_by_index(index: Optional[int], options: list[str], default: str) -> str:
+    if index is None or index < 0 or index >= len(options):
+        return default
+    return options[index]
+
+
+def _build_fee_rows_text(
+    fee_choice: str,
+    *,
+    estimate: Optional[dict],
+    estimating: bool = False,
+    err: str = "",
+    value_prefix: str = "",
+    selected_mark: str = "● ",
+    unselected_mark: str = "○ ",
+) -> list[str]:
+    if estimating:
+        return [f"  {label} — estimating…" for label in _FEE_LABELS]
+
+    if err or not estimate:
+        return [f"  {label} — unavailable" for label in _FEE_LABELS]
+
+    fee_opts = estimate.get("fee_options") or {}
+    rows: list[str] = []
+    for choice, label in zip(_FEE_CHOICES, _FEE_LABELS):
+        opt = fee_opts.get(choice) or {}
+        fee_total = opt.get("total_fee_xtz")
+        fee_text = format_xtz(fee_total) if fee_total else "0"
+        mark = selected_mark if fee_choice == choice else unselected_mark
+        rows.append(f"{mark}{label} — {value_prefix}{fee_text} XTZ")
+    return rows
+
+
+def _fee_selection_payload(estimate: Optional[dict], fee_choice: str) -> dict[str, Optional[int]]:
+    if not estimate:
+        return {"fee_mutez": None, "gas_limit": None, "storage_limit": None}
+    fee_opts = estimate.get("fee_options") or {}
+    chosen = fee_opts.get(fee_choice) or {}
+    return {
+        "fee_mutez": chosen.get("tx_fee_mutez"),
+        "gas_limit": chosen.get("gas_limit"),
+        "storage_limit": chosen.get("storage_limit"),
+    }
+
+
+def _tx_fee_mutez_from_choice(estimate: Optional[dict], fee_choice: str) -> Optional[int]:
+    tx_fee = _fee_selection_payload(estimate, fee_choice).get("fee_mutez")
+    try:
+        return int(tx_fee) if tx_fee is not None else None
+    except _NUMERIC_PARSE_EXCEPTIONS as e:
+        log_error("Failed to parse tx fee from fee choice", exception=e, tx_fee=tx_fee)
+        return None
+
+
+def _enable_action_button(owner: Any, button_id: str, debug_context: str) -> None:
+    try:
+        btn = owner.query_one(button_id, Button)
+        btn.disabled = False
+        btn.focus()
+    except _UI_QUERY_EXCEPTIONS as e:
+        log_debug(debug_context, exception=str(e))
+
+
+def _start_estimation_pulse(owner: Any) -> None:
+    owner._estimating = True
+    owner._est_i = 0
+    if owner._est_timer is None:
+        owner._est_timer = owner.set_interval(Config.ESTIMATION_PULSE_INTERVAL, owner._tick_est_pulse)
+
+
+def _stop_estimation_pulse(owner: Any) -> None:
+    owner._estimating = False
+    if owner._est_timer is not None:
+        owner._est_timer.stop()
+        owner._est_timer = None
+
+
+def _tick_estimation_pulse(owner: Any) -> None:
+    if not owner._estimating:
+        return
+    owner._est_i += 1
+    owner._render_summary(estimating=True)
+    owner._update_fee_list(estimating=True)
+
+
+def _init_fee_rows(owner: Any) -> None:
+    """Create the 3 fixed fee rows once, keeping Label refs for fast updates."""
+    lv = owner.query_one("#fee_list", ListView)
+    lv.clear()
+    owner._fee_labels = []
+    for _ in range(3):
+        lbl = Label("")
+        owner._fee_labels.append(lbl)
+        lv.append(ListItem(lbl))
+
+
+def _update_fee_title(owner: Any, *, estimating: bool, debug_context: str) -> None:
+    try:
+        fee_title = owner.query_one("#fee_title", Static)
+        if estimating:
+            shimmer = shimmer_text("Estimating...", owner._est_i, span=2, pingpong=True)
+            fee_title.update(f"[b]Fee[/b] — {shimmer} [dim](↑/↓ to choose)[/dim]")
+        else:
+            fee_title.update("[b]Fee[/b] (↑/↓ to choose)")
+    except _UI_QUERY_EXCEPTIONS as e:
+        log_debug(debug_context, exception=str(e))
+
+
+def _handle_fee_selection(
+    owner: Any,
+    event: ListView.Selected,
+    *,
+    render_requires_estimate: bool = False,
+) -> None:
+    idx = event.list_view.index
+    if idx is None:
+        return
+    owner._fee_choice = _fee_choice_from_index(idx, owner._fee_choice)
+    owner._update_fee_list(estimating=False)
+    if render_requires_estimate and not owner._estimate:
+        return
+    owner._render_summary(estimating=False)
+
+
+def _apply_basic_estimate_fallback(owner: Any, *, enable_action: Callable[[], None]) -> None:
+    if not owner._estimating or owner._estimate is not None:
+        return
+    owner._stop_est_pulse()
+    owner._render_summary(err="")
+    owner._update_fee_list(estimating=False)
+    enable_action()
+
+
+def _focus_cancel_button(owner: Any, *, context: str, fallbacks: tuple[tuple[str, type], ...] = ()) -> None:
+    _focus_with_fallback(
+        owner,
+        primary=("#cancel", Button),
+        fallbacks=fallbacks,
+        primary_error=f"Failed to focus cancel button in {context}",
+        fallback_error=f"Failed to focus fallback buttons in {context}",
+    )
+
+
+def _move_focus_in_button_row(
+    focused: Any,
+    key: str,
+    *,
+    include_hidden: bool = True,
+    require_visible: bool = False,
+) -> bool:
+    if key not in ("left", "right") or not isinstance(focused, Button):
+        return False
+    parent = focused.parent
+    if not isinstance(parent, Horizontal):
+        return False
+
+    focusables: list[Button] = []
+    for child in parent.children:
+        if not isinstance(child, Button):
+            continue
+        if not include_hidden and child.has_class("hidden"):
+            continue
+        if require_visible and not getattr(child, "visible", True):
+            continue
+        focusables.append(child)
+
+    if focused not in focusables:
+        return False
+
+    idx = focusables.index(focused)
+    if key == "left" and idx > 0:
+        focusables[idx - 1].focus()
+        return True
+    if key == "right" and idx < len(focusables) - 1:
+        focusables[idx + 1].focus()
+        return True
+    return False
+
+
+def _handle_input_escape_focus_cancel(
+    owner: Any,
+    event: Any,
+    key: str,
+    *,
+    context: str,
+    fallbacks: tuple[tuple[str, type], ...] = (),
+) -> bool:
+    """Return True when focus is in Input and caller should early-return."""
+    if not isinstance(owner.app.focused, Input):
+        return False
+    if key == "escape":
+        _focus_cancel_button(owner, context=context, fallbacks=fallbacks)
+        event.stop()
+    return True
+
+
+def _handle_backspace_escape(
+    owner: Any,
+    event: Any,
+    key: str,
+    *,
+    back_handler: Callable[[], None],
+    cancel_handler: Callable[[], None],
+    back_enabled: bool,
+) -> bool:
+    if key == "backspace" and back_enabled:
+        back_handler()
+        event.stop()
+        return True
+    if key == "escape":
+        cancel_handler()
+        event.stop()
+        return True
+    return False
+
+
+def _handle_tx_confirm_key(
+    owner: Any,
+    event: Any,
+    key: str,
+    *,
+    context: str,
+    action_handler: Callable[[], None],
+) -> bool:
+    # Let Input/ListView handle keys naturally, but allow escape to blur first.
+    if isinstance(owner.app.focused, (Input, ListView)):
+        if key == "escape" and isinstance(owner.app.focused, Input):
+            _focus_cancel_button(
+                owner,
+                context=context,
+                fallbacks=(("#toggle", Button), ("#send", Button), ("#delegate", Button)),
+            )
+            event.stop()
+        return True
+
+    if _handle_backspace_escape(
+        owner,
+        event,
+        key,
+        back_handler=owner.back_pressed,
+        cancel_handler=owner.cancel_pressed,
+        back_enabled=bool(getattr(owner, "show_back_button", False)),
+    ):
+        return True
+
+    if key != "enter":
+        return False
+    try:
+        if owner.query_one("#toggle", Button).has_focus:
+            owner._toggle_advanced()
+            return True
+        if owner.query_one("#cancel", Button).has_focus:
+            owner.cancel_pressed()
+            return True
+    except _UI_QUERY_EXCEPTIONS as e:
+        log_error("Failed to check tx confirm button focus", exception=e)
+    action_handler()
+    return True
+
+
+def _parse_tx_overrides(
+    owner: Any,
+    *,
+    fee_input_id: str = "#fee_xtz",
+    gas_input_id: str = "#gas_limit",
+    storage_input_id: str = "#storage_limit",
+) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    """Parse optional manual fee/gas/storage overrides from screen inputs."""
+    fee_xtz_s = sanitize_input(owner.query_one(fee_input_id, Input).value or "")
+    gas_s = sanitize_input(owner.query_one(gas_input_id, Input).value or "")
+    storage_s = sanitize_input(owner.query_one(storage_input_id, Input).value or "")
+
+    fee_mutez: Optional[int] = None
+    gas: Optional[int] = None
+    storage: Optional[int] = None
+
+    if fee_xtz_s:
+        is_valid, error_msg, fee_xtz = validate_fee(fee_xtz_s)
+        if not is_valid:
+            raise ValueError(f"Invalid fee: {error_msg}")
+        fee_mutez = _xtz_to_mutez(fee_xtz)
+
+    if gas_s:
+        is_valid, error_msg, gas = validate_gas_limit(gas_s)
+        if not is_valid:
+            raise ValueError(f"Invalid gas limit: {error_msg}")
+
+    if storage_s:
+        is_valid, error_msg, storage = validate_storage_limit(storage_s)
+        if not is_valid:
+            raise ValueError(f"Invalid storage limit: {error_msg}")
+
+    return fee_mutez, gas, storage
+
+
+def _tx_modal_result(
+    *,
+    ok: bool,
+    fee_mutez: Optional[int] = None,
+    gas_limit: Optional[int] = None,
+    storage_limit: Optional[int] = None,
+    back: bool = False,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": ok,
+        "fee_mutez": fee_mutez,
+        "gas_limit": gas_limit,
+        "storage_limit": storage_limit,
+    }
+    if back:
+        payload[BACK_NAV_MARKER] = True
+    return payload
+
+
 def format_relative_time(timestamp_iso: str) -> str:
     """Format ISO timestamp as relative time (e.g., '5 min ago', '2 hours ago').
 
@@ -370,8 +750,6 @@ def format_relative_time(timestamp_iso: str) -> str:
         Relative time string or original timestamp if parsing fails
     """
     try:
-        from datetime import datetime, timezone
-
         # Parse ISO timestamp (handle both with and without timezone)
         if timestamp_iso.endswith('Z'):
             dt = datetime.fromisoformat(timestamp_iso.replace('Z', '+00:00'))
@@ -407,7 +785,7 @@ def format_relative_time(timestamp_iso: str) -> str:
             years = int(seconds / 31536000)
             return f"{years} year{'s' if years > 1 else ''} ago"
 
-    except Exception as e:
+    except (ValueError, TypeError, OverflowError) as e:
         log_error("Failed to parse relative time", exception=e, timestamp=timestamp_iso)
         # Fallback: return first 10 chars (date part)
         return timestamp_iso[:10] if len(timestamp_iso) >= 10 else timestamp_iso
@@ -439,8 +817,14 @@ def _http_code(
 ) -> int:
     """Return HTTP status code for a simple GET, or 0 on network error."""
     try:
+        safe_url = normalize_https_url(url, allow_query=True, allow_fragment=False)
+    except ValueError as e:
+        log_warning("Blocked unsafe URL in HTTP probe", url=url, reason=str(e))
+        return 0
+
+    try:
         req = urllib.request.Request(
-            url,
+            safe_url,
             data=data,
             method=method,
             headers=headers
@@ -449,15 +833,15 @@ def _http_code(
                 "Accept": "application/json",
             },
         )
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # nosec B310
             return int(getattr(resp, "status", 0) or 0)
     except urllib.error.HTTPError as e:
         try:
             return int(getattr(e, "code", 0) or 0)
-        except Exception as ex:
+        except (TypeError, ValueError) as ex:
             log_error("Failed to extract HTTP error code", exception=ex)
             return 0
-    except Exception as e:
+    except _FLOW_PRECHECK_EXCEPTIONS + (OSError,) as e:
         log_error("HTTP code check failed", exception=e, url=url)
         return 0
 
@@ -466,15 +850,16 @@ def _http_code(
 
 def _fetch_json(url: str, timeout_s: float = Config.RPC_FETCH_TIMEOUT) -> Any:
     """Fetch JSON from URL (GET)."""
+    safe_url = normalize_https_url(url, allow_query=True, allow_fragment=False)
     req = urllib.request.Request(
-        url,
+        safe_url,
         method="GET",
         headers={
             "User-Agent": "tui-tezos-wallet/1.0",
             "Accept": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # nosec B310
         raw = resp.read()
     return json.loads(raw.decode("utf-8"))
 
@@ -486,7 +871,7 @@ def _fetch_tzkt_head_level(net: str) -> Optional[int]:
         data = _fetch_json(rpc_url, timeout_s=Config.RPC_FETCH_TIMEOUT)
         if isinstance(data, dict) and "level" in data:
             return int(data.get("level") or 0)
-    except Exception as e:
+    except _FLOW_PRECHECK_EXCEPTIONS as e:
         log_error("Failed to fetch block header from TzKT RPC", exception=e, url=rpc_url)
 
     api_base = Config.TZKT_API_MAINNET
@@ -497,13 +882,13 @@ def _fetch_tzkt_head_level(net: str) -> Optional[int]:
     for url in urls:
         try:
             data = _fetch_json(url, timeout_s=Config.RPC_FETCH_TIMEOUT)
-        except Exception as e:
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
             log_error("Failed to fetch TzKT head", exception=e, url=url)
             continue
         if isinstance(data, dict) and "level" in data:
             try:
                 return int(data.get("level") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
     return None
 
@@ -512,13 +897,13 @@ def _fetch_xtz_price_usd() -> Optional[float]:
     url = "https://api.coingecko.com/api/v3/simple/price?ids=tezos&vs_currencies=usd"
     try:
         data = _fetch_json(url, timeout_s=Config.RPC_FETCH_TIMEOUT)
-    except Exception as e:
+    except _FLOW_PRECHECK_EXCEPTIONS as e:
         log_error("Failed to fetch XTZ price", exception=e, url=url)
         return None
     try:
         price = data.get("tezos", {}).get("usd")
         return float(price) if price is not None else None
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -528,7 +913,11 @@ def find_baker_for_operation(rpc: str, oph: str, max_depth: int = Config.BAKER_S
     Scans head, head~1, ... head~max_depth using `operation_hashes` (cheap),
     then reads the block header to get `baker`.
     """
-    rpc = (rpc or "").rstrip("/")
+    try:
+        rpc = normalize_rpc_url(rpc)
+    except ValueError as e:
+        log_warning("Invalid RPC for baker lookup", rpc=rpc, reason=str(e))
+        return None
     oph = (oph or "").strip()
     if not rpc or not oph:
         return None
@@ -540,7 +929,7 @@ def find_baker_for_operation(rpc: str, oph: str, max_depth: int = Config.BAKER_S
                 f"{rpc}/chains/main/blocks/{block_id}/operation_hashes",
                 timeout_s=Config.RPC_LONG_TIMEOUT,
             )
-        except Exception as e:
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
             log_error("Failed to fetch operation hashes", exception=e, block_id=block_id)
             continue
 
@@ -554,11 +943,11 @@ def find_baker_for_operation(rpc: str, oph: str, max_depth: int = Config.BAKER_S
                     baker = header.get("baker")
                     if isinstance(baker, str) and baker.startswith("tz"):
                         return baker
-                except Exception as e:
+                except _FLOW_PRECHECK_EXCEPTIONS as e:
                     log_error("Failed to fetch block header for baker", exception=e, block_id=block_id)
                     return None
                 return None
-        except Exception as e:
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
             log_error("Failed to search for operation in block", exception=e, block_id=block_id)
             continue
 
@@ -575,12 +964,17 @@ def find_baker_for_operation(rpc: str, oph: str, max_depth: int = Config.BAKER_S
                     baker = baker.get("address")
                 if isinstance(baker, str) and baker.startswith("tz"):
                     return baker
-    except Exception as e:
+    except _FLOW_PRECHECK_EXCEPTIONS as e:
         log_error("Failed to resolve baker via TzKT", exception=e, oph=oph)
 
     return None
 def rpc_supports_send(rpc: str) -> bool:
-    url = f"{rpc.rstrip('/')}/injection/operation"
+    try:
+        rpc = normalize_rpc_url(rpc)
+    except ValueError as e:
+        log_warning("Invalid RPC for send capability probe", rpc=rpc, reason=str(e))
+        return False
+    url = f"{rpc}/injection/operation"
     code = _http_code(url)
     if code in _OK_CODES:
         return True
@@ -600,7 +994,12 @@ def rpc_supports_send(rpc: str) -> bool:
 
 
 def rpc_supports_simulation(rpc: str) -> bool:
-    url = f"{rpc.rstrip('/')}/chains/main/blocks/head/helpers/scripts/run_operation"
+    try:
+        rpc = normalize_rpc_url(rpc)
+    except ValueError as e:
+        log_warning("Invalid RPC for simulation capability probe", rpc=rpc, reason=str(e))
+        return False
+    url = f"{rpc}/chains/main/blocks/head/helpers/scripts/run_operation"
     code = _http_code(url)
     if code in _OK_CODES:
         return True
@@ -622,7 +1021,8 @@ def rpc_supports_simulation(rpc: str) -> bool:
 def rpc_supports_stake(rpc: str, source_address: str) -> bool:
     """Check if the RPC supports stake/unstake via legacy transaction entrypoint."""
     try:
-        head = _fetch_json(f"{rpc.rstrip('/')}/chains/main/blocks/head/hash")
+        rpc = normalize_rpc_url(rpc)
+        head = _fetch_json(f"{rpc}/chains/main/blocks/head/hash")
         if not isinstance(head, str) or not head:
             return False
 
@@ -645,24 +1045,24 @@ def rpc_supports_stake(rpc: str, source_address: str) -> bool:
 
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            f"{rpc.rstrip('/')}/chains/main/blocks/head/helpers/forge/operations",
+            f"{rpc}/chains/main/blocks/head/helpers/forge/operations",
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
 
-        with urllib.request.urlopen(req, timeout=Config.RPC_LONG_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=Config.RPC_LONG_TIMEOUT) as resp:  # nosec B310
             return int(getattr(resp, "status", 0) or 0) == 200
     except urllib.error.HTTPError as e:
         try:
             body = e.read().decode("utf-8")
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             body = str(e)
         if "No case matched" in body and "At /kind" in body:
             return False
         log_warning("Stake support probe failed", exception=e, rpc=rpc)
         return False
-    except Exception as e:
+    except _FLOW_PRECHECK_EXCEPTIONS + (OSError,) as e:
         log_warning("Stake support probe failed", exception=e, rpc=rpc)
         return False
 
@@ -672,11 +1072,26 @@ def choose_working_rpc(current_rpc: str) -> tuple[str, bool, bool]:
 
     Returns (rpc, supports_send, supports_simulation).
     """
+    fallback_rpc = Config.RPC_DEFAULT_GHOSTNET if network_from_rpc(current_rpc) == "ghostnet" else Config.RPC_DEFAULT_MAINNET
+    current_rpc, _ = _normalize_rpc_runtime(current_rpc, fallback=fallback_rpc)
+
     net = network_from_rpc(current_rpc)
     candidates = _MAINNET_RPC_CANDIDATES if net == "mainnet" else _GHOSTNET_RPC_CANDIDATES
 
     # Prefer candidates order; only try current if it's not already listed.
-    ordered = candidates + ([current_rpc] if current_rpc not in candidates else [])
+    ordered_raw = candidates + ([current_rpc] if current_rpc not in candidates else [])
+    ordered: list[str] = []
+    for candidate in ordered_raw:
+        try:
+            normalized = normalize_rpc_url(candidate)
+        except ValueError as e:
+            log_warning("Skipping invalid RPC candidate", rpc=candidate, reason=str(e))
+            continue
+        if normalized not in ordered:
+            ordered.append(normalized)
+
+    if not ordered:
+        ordered = [current_rpc]
 
     best_send_only: str | None = None
 
@@ -705,6 +1120,12 @@ def is_stale_branch_error(err: Exception) -> bool:
     if "block" in msg and "too old" in msg:
         return True
     return False
+
+
+def is_gas_exhausted_error(err: Exception) -> bool:
+    """Detect gas exhausted errors to allow safe autofill fallback."""
+    msg = str(err).lower()
+    return "gas_exhausted" in msg and "operation" in msg
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -802,7 +1223,7 @@ class ConfirmScreen(ModalScreen[bool]):
                         event.stop()
                         return
                     self.screen.focus_next()
-            except Exception:
+            except _UI_QUERY_EXCEPTIONS:
                 self.screen.focus_next()
             event.stop()
             return
@@ -812,7 +1233,7 @@ class ConfirmScreen(ModalScreen[bool]):
                     self.dismiss(False)
                 else:
                     self.dismiss(True)
-            except Exception:
+            except _UI_QUERY_EXCEPTIONS:
                 self.dismiss(True)
             event.stop()
 
@@ -879,6 +1300,7 @@ class PromptScreen(ModalScreen[str]):
         width: auto;
         min-width: 65;
         max-width: 80;
+        min-height: 22;
         height: auto;
         max-height: 30;
         background: $surface;
@@ -970,10 +1392,6 @@ class PromptScreen(ModalScreen[str]):
         inp = self.query_one("#inp", Input)
         inp.focus()
 
-    @on(Input.Changed, "#inp")
-    def input_changed(self, event: Input.Changed) -> None:
-        pass  # Input changes handled by Textual
-
     @on(Input.Submitted)
     def submitted(self, event: Input.Submitted) -> None:
         self.dismiss(event.value)
@@ -986,30 +1404,22 @@ class PromptScreen(ModalScreen[str]):
             value = inp.value
             self.dismiss(value)
         elif event.button.id == "back":
-            self.dismiss("__BACK__")
+            self.dismiss(BACK_NAV_MARKER)
         else:
             self.dismiss("")
 
-    def on_unmount(self) -> None:
-        pass
-
     def on_key(self, event) -> None:
-        from textual.widgets import Input
-
         key = getattr(event, "key", None)
 
         # 🚫 If focus is on the Input widget, let it handle keys naturally
         # Only intercept Escape for cancel functionality
         if isinstance(self.app.focused, Input):
             if key == "ctrl+b" and self._show_back_button:
-                self.dismiss("__BACK__")
+                self.dismiss(BACK_NAV_MARKER)
                 event.stop()
                 return
             if key == "escape":
-                try:
-                    self.query_one("#cancel", Button).focus()
-                except Exception as e:
-                    log_debug("Failed to focus cancel button in passphrase screen", exception=str(e))
+                _focus_cancel_button(self, context="passphrase screen", fallbacks=(("#ok", Button),))
                 event.stop()
                 return
             # For all other keys, let Input handle them naturally (NO event.stop())
@@ -1017,11 +1427,11 @@ class PromptScreen(ModalScreen[str]):
 
 
         if key == "ctrl+b" and self._show_back_button:
-            self.dismiss("__BACK__")
+            self.dismiss(BACK_NAV_MARKER)
             event.stop()
             return
         if key == "backspace" and self._show_back_button:
-            self.dismiss("__BACK__")
+            self.dismiss(BACK_NAV_MARKER)
             event.stop()
             return
         if key == "escape":
@@ -1029,9 +1439,6 @@ class PromptScreen(ModalScreen[str]):
             event.stop()
 
     def dismiss(self, result=None) -> None:
-        import traceback
-        stack_lines = traceback.format_stack()
-        # Show last 5 frames (excluding this one)
         return super().dismiss(result)
 
 
@@ -1097,9 +1504,6 @@ class SendAmountScreen(PromptScreen):
     @on(Input.Changed, "#inp")
     def on_amount_changed(self, event: Input.Changed) -> None:
         """Show sassy comment based on amount entered."""
-        # Call parent's input_changed first
-        super().input_changed(event)
-
         # Get comment widget
         comment_widget = self.query_one("#amount_comment", Static)
 
@@ -1152,6 +1556,10 @@ class SendPassphraseScreen(PromptScreen):
         margin-bottom: 0;
     }
 
+    SendPassphraseScreen #title {
+        color: #fbbf24;
+    }
+
     SendPassphraseScreen #wallet_info {
         color: $accent;
         margin-bottom: 0;
@@ -1192,7 +1600,7 @@ class SendPassphraseScreen(PromptScreen):
 
 
 class BackupConfirmPassphraseScreen(PromptScreen):
-    """Prompt screen for confirming backup passphrase (yellow confirm button)."""
+    """Prompt screen for confirming backup encryption password (yellow confirm button)."""
     CSS = """
     BackupConfirmPassphraseScreen #ok {
         background: #f97316;
@@ -1207,7 +1615,7 @@ class BackupConfirmPassphraseScreen(PromptScreen):
 
 
 class BackupPassphraseScreen(ModalScreen[Optional[dict]]):
-    """Single-step backup passphrase + confirm."""
+    """Single-step backup encryption password + confirm."""
 
     CSS = """
     BackupPassphraseScreen {
@@ -1277,9 +1685,9 @@ class BackupPassphraseScreen(ModalScreen[Optional[dict]]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static("[b]🔐 Backup Passphrase[/b]", id="title", markup=True)
-            yield Input(placeholder="Create passphrase", password=True, id="inp_pass")
-            yield Input(placeholder="Confirm passphrase", password=True, id="inp_confirm")
+            yield Static("[b]🔐 Backup Encryption Password[/b]", id="title", markup=True)
+            yield Input(placeholder="Create encryption password", password=True, id="inp_pass")
+            yield Input(placeholder="Confirm encryption password", password=True, id="inp_confirm")
             yield Static(self._hint, id="hint", markup=True)
             with Horizontal():
                 yield Button("← Back", id="back", variant="default")
@@ -1301,7 +1709,7 @@ class BackupPassphraseScreen(ModalScreen[Optional[dict]]):
 
     @on(Button.Pressed, "#back")
     def back_pressed(self) -> None:
-        self.dismiss({"__BACK__": True})
+        self.dismiss({BACK_NAV_MARKER: True})
 
     @on(Button.Pressed, "#cancel")
     def cancel_pressed(self) -> None:
@@ -1316,10 +1724,7 @@ class BackupPassphraseScreen(ModalScreen[Optional[dict]]):
                 event.stop()
                 return
             if key == "escape":
-                try:
-                    self.query_one("#cancel", Button).focus()
-                except Exception as e:
-                    log_debug("Failed to focus cancel button in passphrase confirmation", exception=str(e))
+                _focus_cancel_button(self, context="passphrase confirmation", fallbacks=(("#ok", Button),))
                 event.stop()
                 return
             return
@@ -1327,22 +1732,11 @@ class BackupPassphraseScreen(ModalScreen[Optional[dict]]):
             self.dismiss(None)
             event.stop()
             return
-        if key in ("left", "right") and isinstance(self.app.focused, Button):
-            parent = self.app.focused.parent
-            if isinstance(parent, Horizontal):
-                focusables = [c for c in parent.children if isinstance(c, Button)]
-                if self.app.focused in focusables:
-                    idx = focusables.index(self.app.focused)
-                    if key == "left" and idx > 0:
-                        focusables[idx - 1].focus()
-                        event.stop()
-                        return
-                    if key == "right" and idx < len(focusables) - 1:
-                        focusables[idx + 1].focus()
-                        event.stop()
-                        return
+        if _move_focus_in_button_row(self.app.focused, key):
+            event.stop()
+            return
         if key == "backspace":
-            self.dismiss({"__BACK__": True})
+            self.dismiss({BACK_NAV_MARKER: True})
             event.stop()
             return
 
@@ -1409,9 +1803,6 @@ class StakeAmountScreen(PromptScreen):
     @on(Input.Changed, "#inp")
     def on_amount_changed(self, event: Input.Changed) -> None:
         """Show comment based on stake amount entered."""
-        # Call parent's input_changed first
-        super().input_changed(event)
-
         # Get comment widget
         comment_widget = self.query_one("#amount_comment", Static)
 
@@ -1449,6 +1840,7 @@ class StakePassphraseScreen(PromptScreen):
         width: auto;
         min-width: 65;
         max-width: 80;
+        min-height: 22;
         height: auto;
         max-height: 30;
         background: $surface;
@@ -1458,6 +1850,10 @@ class StakePassphraseScreen(PromptScreen):
 
     StakePassphraseScreen Static {
         margin-bottom: 0;
+    }
+
+    StakePassphraseScreen #title {
+        color: #fbbf24;
     }
 
     StakePassphraseScreen #wallet_info {
@@ -1499,6 +1895,57 @@ class StakePassphraseScreen(PromptScreen):
                 yield Button("Cancel", id="cancel")
 
 
+class WarningPassphraseScreen(StakePassphraseScreen):
+    """Prompt screen for passphrase where the flow is 'warning' themed (delegate / change baker)."""
+
+    CSS = """
+    WarningPassphraseScreen {
+        align: center middle;
+    }
+
+    WarningPassphraseScreen > Vertical {
+        width: auto;
+        min-width: 65;
+        max-width: 80;
+        min-height: 22;
+        height: auto;
+        max-height: 30;
+        background: $surface;
+        border: heavy #eab308;
+        padding: 1 2;
+    }
+
+    WarningPassphraseScreen Static {
+        margin-bottom: 0;
+    }
+
+    WarningPassphraseScreen #title {
+        color: #fbbf24;
+    }
+
+    WarningPassphraseScreen #wallet_info {
+        color: $accent;
+        margin-bottom: 0;
+    }
+
+    WarningPassphraseScreen #inp {
+        margin-top: 1;
+        margin-bottom: 1;
+    }
+
+    WarningPassphraseScreen #error_note {
+        margin-top: 0;
+        margin-bottom: 1;
+        color: #ef4444;
+        text-style: bold;
+    }
+
+    WarningPassphraseScreen Horizontal {
+        align: center middle;
+    }
+    """
+
+
 class ConfirmStakeScreen(ModalScreen[dict]):
     """
     Confirmation screen for staking with fee estimation.
@@ -1521,6 +1968,7 @@ class ConfirmStakeScreen(ModalScreen[dict]):
         width: auto;
         min-width: 65;
         max-width: 80;
+        min-height: 22;
         height: auto;
         max-height: 30;
         background: $surface;
@@ -1580,7 +2028,6 @@ class ConfirmStakeScreen(ModalScreen[dict]):
         self._estimate: Optional[dict] = None
         self._fee_choice: str = "normal"   # economy|normal|priority
         self._fee_labels: list[Label] = []
-        self._comment_text: str = ""
 
         # Estimation pulse
         self._est_timer = None
@@ -1588,10 +2035,11 @@ class ConfirmStakeScreen(ModalScreen[dict]):
         self._estimating: bool = False
 
     def _resolve_baker_label(self) -> str:
-        baker_addr = get_delegation_info(self.rpc, self.address) or ""
+        state = get_wallet_chain_state(self.rpc, self.address, force_refresh=True, prefer_rpc=True)
+        baker_addr = state.get("delegate") or ""
         if not baker_addr:
             return "—"
-        info = get_baker_info(self.rpc, baker_addr)
+        info = get_baker_info(self.rpc, baker_addr, force_refresh=True)
         alias = info.get("alias") if info else None
         if alias:
             return f"{alias} [dim]({baker_addr})[/dim]"
@@ -1618,8 +2066,7 @@ class ConfirmStakeScreen(ModalScreen[dict]):
         # Show confirmation comment based on amount
         comment_widget = self.query_one("#confirm_comment", Static)
         confirmation_msg = get_confirmation_comment(self.amount)
-        self._comment_text = f"[dim italic]{confirmation_msg}[/dim italic]"
-        comment_widget.update(self._comment_text)
+        comment_widget.update(f"[dim italic]{confirmation_msg}[/dim italic]")
 
         self._start_est_pulse()
         self._render_summary(estimating=True)
@@ -1635,45 +2082,14 @@ class ConfirmStakeScreen(ModalScreen[dict]):
     def on_unmount(self) -> None:
         self._stop_est_pulse()
 
-    @on(Input.Changed, "#fee_xtz")
-    def fee_changed(self, event: Input.Changed) -> None:
-        inp = self.query_one("#fee_xtz", Input)
-        filtered = filter_amount_input(event.value)
-        if filtered != event.value:
-            inp.value = filtered
-
-    @on(Input.Changed, "#gas_limit")
-    def gas_changed(self, event: Input.Changed) -> None:
-        inp = self.query_one("#gas_limit", Input)
-        filtered = filter_digits_input(event.value)
-        if filtered != event.value:
-            inp.value = filtered
-
-    @on(Input.Changed, "#storage_limit")
-    def storage_changed(self, event: Input.Changed) -> None:
-        inp = self.query_one("#storage_limit", Input)
-        filtered = filter_digits_input(event.value)
-        if filtered != event.value:
-            inp.value = filtered
-
     def _start_est_pulse(self) -> None:
-        self._estimating = True
-        self._est_i = 0
-        if self._est_timer is None:
-            self._est_timer = self.set_interval(Config.ESTIMATION_PULSE_INTERVAL, self._tick_est_pulse)
+        _start_estimation_pulse(self)
 
     def _stop_est_pulse(self) -> None:
-        self._estimating = False
-        if self._est_timer is not None:
-            self._est_timer.stop()
-            self._est_timer = None
+        _stop_estimation_pulse(self)
 
     def _tick_est_pulse(self) -> None:
-        if not self._estimating:
-            return
-        self._est_i += 1
-        self._render_summary(estimating=True)
-        self._update_fee_list(estimating=True)
+        _tick_estimation_pulse(self)
 
     def _render_summary(self, estimating: bool = False, err: str = "") -> None:
         net = network_from_rpc(self.rpc)
@@ -1703,11 +2119,6 @@ class ConfirmStakeScreen(ModalScreen[dict]):
                 "You can still STAKE (autofill).",
             ]
         else:
-            est = self._estimate or {}
-            fee_opts = est.get("fee_options") or {}
-            chosen = fee_opts.get(self._fee_choice) or {}
-            chosen_total = chosen.get("total_fee_xtz")
-
             lines = [
                 f"[b #fdba74]Network:[/b #fdba74]   {net}",
                 "",
@@ -1721,73 +2132,27 @@ class ConfirmStakeScreen(ModalScreen[dict]):
         self.query_one("#summary", Static).update("\n".join(lines))
 
     def _init_fee_list(self) -> None:
-        """Create the 3 fixed fee rows."""
-        lv = self.query_one("#fee_list", ListView)
-        lv.clear()
-        self._fee_labels = []
-        for _ in range(3):
-            lbl = Label("")
-            self._fee_labels.append(lbl)
-            lv.append(ListItem(lbl))
+        _init_fee_rows(self)
 
     def _update_fee_list(self, estimating: bool = False, err: str = "") -> None:
         """Update fee rows text + checkmark."""
         if not self._fee_labels:
             self._init_fee_list()
 
-        try:
-            fee_title = self.query_one("#fee_title", Static)
-            if estimating:
-                shimmer = shimmer_text("Estimating...", self._est_i, span=2, pingpong=True)
-                fee_title.update(f"[b]Fee[/b] — {shimmer} [dim](↑/↓ to choose)[/dim]")
-            else:
-                fee_title.update("[b]Fee[/b] (↑/↓ to choose)")
-        except Exception as e:
-            log_debug("Failed to update fee title in stake confirm", exception=str(e))
+        _update_fee_title(self, estimating=estimating, debug_context="Failed to update fee title in stake confirm")
 
-        if estimating:
-            texts = [
-                "  Economy — estimating…",
-                "  Normal — estimating…",
-                "  Priority — estimating…",
-            ]
-        elif err or not self._estimate:
-            texts = [
-                "  Economy — unavailable",
-                "  Normal — unavailable",
-                "  Priority — unavailable",
-            ]
-        else:
-            fee_opts = self._estimate.get("fee_options") or {}
-            eco = fee_opts.get("economy") or {}
-            nor = fee_opts.get("normal") or {}
-            pri = fee_opts.get("priority") or {}
-
-            eco_fee = format_xtz(eco.get("total_fee_xtz")) if eco.get("total_fee_xtz") else "0"
-            nor_fee = format_xtz(nor.get("total_fee_xtz")) if nor.get("total_fee_xtz") else "0"
-            pri_fee = format_xtz(pri.get("total_fee_xtz")) if pri.get("total_fee_xtz") else "0"
-
-            check_eco = "● " if self._fee_choice == "economy" else "○ "
-            check_nor = "● " if self._fee_choice == "normal" else "○ "
-            check_pri = "● " if self._fee_choice == "priority" else "○ "
-
-            texts = [
-                f"{check_eco}Economy — {eco_fee} XTZ",
-                f"{check_nor}Normal — {nor_fee} XTZ",
-                f"{check_pri}Priority — {pri_fee} XTZ",
-            ]
+        texts = _build_fee_rows_text(
+            self._fee_choice,
+            estimate=self._estimate,
+            estimating=estimating,
+            err=err,
+        )
 
         for lbl, txt in zip(self._fee_labels, texts):
             lbl.update(txt)
 
-        # Update index
         lv = self.query_one("#fee_list", ListView)
-        if self._fee_choice == "economy":
-            lv.index = 0
-        elif self._fee_choice == "normal":
-            lv.index = 1
-        elif self._fee_choice == "priority":
-            lv.index = 2
+        lv.index = _fee_index_from_choice(self._fee_choice)
 
     @work(exclusive=True, thread=True)
     def _estimate_worker(self) -> None:
@@ -1795,7 +2160,7 @@ class ConfirmStakeScreen(ModalScreen[dict]):
         try:
             est_result = estimate_stake(self.rpc, self.key, self.amount)
             self.app._ui(self._on_estimate_success, est_result)
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error("Stake estimation failed", exception=e)
             self.app._ui(self._on_estimate_error, str(e))
 
@@ -1812,55 +2177,27 @@ class ConfirmStakeScreen(ModalScreen[dict]):
         self._update_fee_list(err=error_msg)
 
     def _enable_stake_button(self) -> None:
-        try:
-            self.query_one("#stake", Button).disabled = False
-            self.query_one("#stake", Button).focus()
-        except Exception as e:
-            log_debug("Failed to enable stake button in stake confirm", exception=str(e))
+        _enable_action_button(self, "#stake", "Failed to enable stake button in stake confirm")
 
     def _apply_estimate_fallback(self) -> None:
-        if not self._estimating or self._estimate is not None:
-            return
-        self._stop_est_pulse()
-        self._render_summary(err="")
-        self._update_fee_list(estimating=False)
-        self._enable_stake_button()
+        _apply_basic_estimate_fallback(self, enable_action=self._enable_stake_button)
 
     @on(ListView.Selected, "#fee_list")
     def fee_selected(self, event: ListView.Selected) -> None:
-        idx = event.list_view.index
-        if idx == 0:
-            self._fee_choice = "economy"
-        elif idx == 1:
-            self._fee_choice = "normal"
-        elif idx == 2:
-            self._fee_choice = "priority"
-
-        self._render_summary()
-        self._update_fee_list()
+        _handle_fee_selection(self, event)
 
     @on(Button.Pressed, "#stake")
     def stake_pressed(self) -> None:
         """User confirmed stake operation."""
         result = {"ok": True}
 
-        # Get fee parameters based on choice
-        if self._estimate:
-            fee_opts = self._estimate.get("fee_options") or {}
-            chosen = fee_opts.get(self._fee_choice) or {}
-            result["fee_mutez"] = chosen.get("fee_mutez")
-            result["gas_limit"] = chosen.get("gas_limit")
-            result["storage_limit"] = chosen.get("storage_limit")
-        else:
-            result["fee_mutez"] = None
-            result["gas_limit"] = None
-            result["storage_limit"] = None
+        result.update(_fee_selection_payload(self._estimate, self._fee_choice))
 
         self.dismiss(result)
 
     @on(Button.Pressed, "#back")
     def back_pressed(self) -> None:
-        self.dismiss({"__BACK__": True})
+        self.dismiss({BACK_NAV_MARKER: True})
 
     @on(Button.Pressed, "#cancel")
     def cancel_pressed(self) -> None:
@@ -1868,13 +2205,14 @@ class ConfirmStakeScreen(ModalScreen[dict]):
 
     def on_key(self, event) -> None:
         key = getattr(event, "key", None)
-        if key == "backspace" and self.show_back_button:
-            self.dismiss({"__BACK__": True})
-            event.stop()
-            return
-        if key == "escape":
-            self.dismiss(None)
-            event.stop()
+        _handle_backspace_escape(
+            self,
+            event,
+            key,
+            back_handler=self.back_pressed,
+            cancel_handler=self.cancel_pressed,
+            back_enabled=self.show_back_button,
+        )
 
 
 class ConfirmUnstakeScreen(ModalScreen[dict]):
@@ -1899,11 +2237,17 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
         width: auto;
         min-width: 65;
         max-width: 80;
+        min-height: 22;
         height: auto;
         max-height: 30;
         background: $surface;
         border: heavy #8b5cf6;
         padding: 1 2;
+    }
+
+    ConfirmUnstakeScreen #title {
+        margin-bottom: 1;
+        color: $accent;
     }
 
     ConfirmUnstakeScreen #summary {
@@ -1971,10 +2315,10 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
         self._est_timer = None
         self._est_i: int = 0
         self._estimating: bool = False
-        self._comment_text: str = ""
 
     def compose(self) -> ComposeResult:
         with Vertical():
+            yield Static("[b]Confirm Unstake[/b]", id="title", markup=True)
             yield Static("", id="summary", markup=True)
 
             yield Static("[b]Fee[/b] (↑/↓ to choose)", id="fee_title", markup=True)
@@ -1991,8 +2335,7 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
     def on_mount(self) -> None:
         comment_widget = self.query_one("#confirm_comment", Static)
         confirmation_msg = get_confirmation_comment(self.amount)
-        self._comment_text = f"[dim italic]{confirmation_msg}[/dim italic]"
-        comment_widget.update(self._comment_text)
+        comment_widget.update(f"[dim italic]{confirmation_msg}[/dim italic]")
 
         self._start_est_pulse()
         self._render_summary(estimating=True)
@@ -2009,31 +2352,19 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
         self._stop_est_pulse()
 
     def _start_est_pulse(self) -> None:
-        self._estimating = True
-        self._est_i = 0
-        if self._est_timer is None:
-            self._est_timer = self.set_interval(Config.ESTIMATION_PULSE_INTERVAL, self._tick_est_pulse)
+        _start_estimation_pulse(self)
 
     def _stop_est_pulse(self) -> None:
-        self._estimating = False
-        if self._est_timer is not None:
-            self._est_timer.stop()
-            self._est_timer = None
+        _stop_estimation_pulse(self)
 
     def _tick_est_pulse(self) -> None:
-        if not self._estimating:
-            return
-        self._est_i += 1
-        self._render_summary(estimating=True)
-        self._update_fee_list(estimating=True)
+        _tick_estimation_pulse(self)
 
     def _render_summary(self, estimating: bool = False, err: str = "") -> None:
         net = network_from_rpc(self.rpc)
 
         if estimating:
             lines = [
-                "[b]Confirm Unstake Operation[/b]",
-                "",
                 f"[b #fdba74]Network:[/b #fdba74]   {net}",
                 "",
                 f"[b cyan]Address:[/b cyan]   {self.address}",
@@ -2042,8 +2373,6 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
             ]
         elif err:
             lines = [
-                "[b]Confirm Unstake Operation[/b]",
-                "",
                 f"[b #fdba74]Network:[/b #fdba74]   {net}",
                 "",
                 f"[b cyan]Address:[/b cyan]   {self.address}",
@@ -2055,11 +2384,6 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
                 "You can still UNSTAKE (autofill).",
             ]
         else:
-            est = self._estimate or {}
-            fee_opts = est.get("fee_options") or {}
-            chosen = fee_opts.get(self._fee_choice) or {}
-            chosen_total = chosen.get("total_fee_xtz")
-
             lines = [
                 "[b]Confirm Unstake Operation[/b]",
                 "",
@@ -2073,77 +2397,33 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
         self.query_one("#summary", Static).update("\n".join(lines))
 
     def _init_fee_list(self) -> None:
-        lv = self.query_one("#fee_list", ListView)
-        lv.clear()
-        self._fee_labels = []
-        for _ in range(3):
-            lbl = Label("")
-            self._fee_labels.append(lbl)
-            lv.append(ListItem(lbl))
+        _init_fee_rows(self)
 
     def _update_fee_list(self, estimating: bool = False, err: str = "") -> None:
         if not self._fee_labels:
             self._init_fee_list()
 
-        try:
-            fee_title = self.query_one("#fee_title", Static)
-            if estimating:
-                shimmer = shimmer_text("Estimating...", self._est_i, span=2, pingpong=True)
-                fee_title.update(f"[b]Fee[/b] — {shimmer} [dim](↑/↓ to choose)[/dim]")
-            else:
-                fee_title.update("[b]Fee[/b] (↑/↓ to choose)")
-        except Exception as e:
-            log_debug("Failed to update fee title in unstake confirm", exception=str(e))
+        _update_fee_title(self, estimating=estimating, debug_context="Failed to update fee title in unstake confirm")
 
-        if estimating:
-            texts = [
-                "  Economy — estimating…",
-                "  Normal — estimating…",
-                "  Priority — estimating…",
-            ]
-        elif err or not self._estimate:
-            texts = [
-                "  Economy — unavailable",
-                "  Normal — unavailable",
-                "  Priority — unavailable",
-            ]
-        else:
-            fee_opts = self._estimate.get("fee_options") or {}
-            eco = fee_opts.get("economy") or {}
-            nor = fee_opts.get("normal") or {}
-            pri = fee_opts.get("priority") or {}
-
-            eco_fee = format_xtz(eco.get("total_fee_xtz")) if eco.get("total_fee_xtz") else "0"
-            nor_fee = format_xtz(nor.get("total_fee_xtz")) if nor.get("total_fee_xtz") else "0"
-            pri_fee = format_xtz(pri.get("total_fee_xtz")) if pri.get("total_fee_xtz") else "0"
-
-            check_eco = "● " if self._fee_choice == "economy" else "○ "
-            check_nor = "● " if self._fee_choice == "normal" else "○ "
-            check_pri = "● " if self._fee_choice == "priority" else "○ "
-
-            texts = [
-                f"{check_eco}Economy — {eco_fee} XTZ",
-                f"{check_nor}Normal — {nor_fee} XTZ",
-                f"{check_pri}Priority — {pri_fee} XTZ",
-            ]
+        texts = _build_fee_rows_text(
+            self._fee_choice,
+            estimate=self._estimate,
+            estimating=estimating,
+            err=err,
+        )
 
         for lbl, txt in zip(self._fee_labels, texts):
             lbl.update(txt)
 
         lv = self.query_one("#fee_list", ListView)
-        if self._fee_choice == "economy":
-            lv.index = 0
-        elif self._fee_choice == "normal":
-            lv.index = 1
-        elif self._fee_choice == "priority":
-            lv.index = 2
+        lv.index = _fee_index_from_choice(self._fee_choice)
 
     @work(exclusive=True, thread=True)
     def _estimate_worker(self) -> None:
         try:
             est_result = estimate_unstake(self.rpc, self.key, self.amount)
             self.app._ui(self._on_estimate_success, est_result)
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error("Unstake estimation failed", exception=e)
             self.app._ui(self._on_estimate_error, str(e))
 
@@ -2160,53 +2440,26 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
         self._update_fee_list(err=error_msg)
 
     def _enable_unstake_button(self) -> None:
-        try:
-            self.query_one("#unstake", Button).disabled = False
-            self.query_one("#unstake", Button).focus()
-        except Exception as e:
-            log_debug("Failed to enable unstake button in unstake confirm", exception=str(e))
+        _enable_action_button(self, "#unstake", "Failed to enable unstake button in unstake confirm")
 
     def _apply_estimate_fallback(self) -> None:
-        if not self._estimating or self._estimate is not None:
-            return
-        self._stop_est_pulse()
-        self._render_summary(err="")
-        self._update_fee_list(estimating=False)
-        self._enable_unstake_button()
+        _apply_basic_estimate_fallback(self, enable_action=self._enable_unstake_button)
 
     @on(ListView.Selected, "#fee_list")
     def fee_selected(self, event: ListView.Selected) -> None:
-        idx = event.list_view.index
-        if idx == 0:
-            self._fee_choice = "economy"
-        elif idx == 1:
-            self._fee_choice = "normal"
-        elif idx == 2:
-            self._fee_choice = "priority"
-
-        self._render_summary()
-        self._update_fee_list()
+        _handle_fee_selection(self, event)
 
     @on(Button.Pressed, "#unstake")
     def unstake_pressed(self) -> None:
         result = {"ok": True}
 
-        if self._estimate:
-            fee_opts = self._estimate.get("fee_options") or {}
-            chosen = fee_opts.get(self._fee_choice) or {}
-            result["fee_mutez"] = chosen.get("fee_mutez")
-            result["gas_limit"] = chosen.get("gas_limit")
-            result["storage_limit"] = chosen.get("storage_limit")
-        else:
-            result["fee_mutez"] = None
-            result["gas_limit"] = None
-            result["storage_limit"] = None
+        result.update(_fee_selection_payload(self._estimate, self._fee_choice))
 
         self.dismiss(result)
 
     @on(Button.Pressed, "#back")
     def back_pressed(self) -> None:
-        self.dismiss({"__BACK__": True})
+        self.dismiss({BACK_NAV_MARKER: True})
 
     @on(Button.Pressed, "#cancel")
     def cancel_pressed(self) -> None:
@@ -2214,13 +2467,14 @@ class ConfirmUnstakeScreen(ModalScreen[dict]):
 
     def on_key(self, event) -> None:
         key = getattr(event, "key", None)
-        if key == "backspace" and self.show_back_button:
-            self.dismiss({"__BACK__": True})
-            event.stop()
-            return
-        if key == "escape":
-            self.dismiss(None)
-            event.stop()
+        _handle_backspace_escape(
+            self,
+            event,
+            key,
+            back_handler=self.back_pressed,
+            cancel_handler=self.cancel_pressed,
+            back_enabled=self.show_back_button,
+        )
 
 
 class NetworkPickerScreen(ModalScreen[str]):
@@ -2278,6 +2532,7 @@ class NetworkPickerScreen(ModalScreen[str]):
     def __init__(self, current: str):
         super().__init__()
         self.current = current  # "mainnet" / "ghostnet"
+        self.options = ["mainnet", "ghostnet"]
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -2306,15 +2561,10 @@ class NetworkPickerScreen(ModalScreen[str]):
 
         try:
             lv.index = 0 if self.current == "mainnet" else 1
-        except Exception as e:
+        except ValueError as e:
             log_error("Failed to set network selection index", exception=e)
 
         lv.focus()
-
-    def _selected_key(self) -> str:
-        lv = self.query_one("#networks", ListView)
-        idx = lv.index or 0
-        return "mainnet" if idx == 0 else "ghostnet"
 
     @on(ListView.Selected)
     def choose_with_enter(self, event: ListView.Selected) -> None:
@@ -2323,20 +2573,23 @@ class NetworkPickerScreen(ModalScreen[str]):
 
     @on(Button.Pressed, "#select")
     def select_pressed(self) -> None:
-        self.dismiss(self._selected_key())
+        lv = self.query_one("#networks", ListView)
+        self.dismiss(_selected_value_by_index(lv.index, self.options, self.current))
 
     @on(Button.Pressed, "#cancel")
     def cancel_pressed(self) -> None:
         self.dismiss("")
 
     def on_key(self, event) -> None:
-        if getattr(event, "key", None) == "escape":
-            self.dismiss("")
+        key = getattr(event, "key", None)
+        if key == "escape":
+            self.cancel_pressed()
             event.stop()
             return
-        if getattr(event, "key", None) == "enter":
+        if key == "enter":
             if isinstance(self.app.focused, ListView):
-                self.dismiss(self._selected_key())
+                lv = self.query_one("#networks", ListView)
+                self.dismiss(_selected_value_by_index(lv.index, self.options, self.current))
                 event.stop()
 
 
@@ -2432,17 +2685,10 @@ class RpcPickerScreen(ModalScreen[str]):
 
         try:
             lv.index = ordered.index(self.current_rpc)
-        except Exception as e:
+        except ValueError as e:
             log_error("Failed to set RPC selection index", exception=e)
 
         lv.focus()
-
-    def _selected_rpc(self) -> str:
-        lv = self.query_one("#rpcs", ListView)
-        idx = lv.index or 0
-        if idx < 0 or idx >= len(self.options):
-            return self.current_rpc
-        return self.options[idx]
 
     @on(ListView.Selected)
     def choose_with_enter(self, event: ListView.Selected) -> None:
@@ -2451,20 +2697,23 @@ class RpcPickerScreen(ModalScreen[str]):
 
     @on(Button.Pressed, "#select")
     def select_pressed(self) -> None:
-        self.dismiss(self._selected_rpc())
+        lv = self.query_one("#rpcs", ListView)
+        self.dismiss(_selected_value_by_index(lv.index, self.options, self.current_rpc))
 
     @on(Button.Pressed, "#cancel")
     def cancel_pressed(self) -> None:
         self.dismiss("")
 
     def on_key(self, event) -> None:
-        if getattr(event, "key", None) == "escape":
-            self.dismiss("")
+        key = getattr(event, "key", None)
+        if key == "escape":
+            self.cancel_pressed()
             event.stop()
             return
-        if getattr(event, "key", None) == "enter":
+        if key == "enter":
             if isinstance(self.app.focused, ListView):
-                self.dismiss(self._selected_rpc())
+                lv = self.query_one("#rpcs", ListView)
+                self.dismiss(_selected_value_by_index(lv.index, self.options, self.current_rpc))
                 event.stop()
 
 
@@ -2535,7 +2784,7 @@ class AddressDetailScreen(ModalScreen[None]):
             self.app.copy_to_clipboard(self.address)  # type: ignore[attr-defined]
             self.app._status_lock_until_refresh = False  # type: ignore[attr-defined]
             self.app._set_status(f"✅ Address copied: {self.address}")  # type: ignore[attr-defined]
-        except Exception as e:
+        except (RuntimeError, OSError, ValueError, ImportError) as e:
             log_warning("Clipboard copy failed", exception=e, address=self.address)
             self.app._set_status(f"❌ Copy failed. Address: {self.address}")  # type: ignore[attr-defined]
 
@@ -2546,11 +2795,11 @@ class AddressDetailScreen(ModalScreen[None]):
     def on_key(self, event) -> None:
         key = getattr(event, "key", None)
         if key == "backspace":
-            self.dismiss({"__BACK__": True})
+            self.dismiss({BACK_NAV_MARKER: True})
             event.stop()
             return
         if key == "escape":
-            self.dismiss(None)
+            self.close_pressed()
             event.stop()
 
 
@@ -2674,14 +2923,6 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
     }
     """
 
-    IMPORT_TYPES = [
-        ("mnemonic12", "🧠 Import with 12 Words", "Default derivation"),
-        ("mnemonic24", "🧠 Import with 24 Words", "Default derivation"),
-        ("secret", "🔑 Import with Secret Key", "Full wallet - can send & receive"),
-        ("watch", "👀 Watch-Only Address", "Monitor only - cannot send"),
-        ("backup", "📦 From Backup File", "Restore from recipe book"),
-    ]
-
     def __init__(self):
         super().__init__()
         self._step = "type"
@@ -2700,9 +2941,9 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
             yield ListView(id="import_types")
             yield Static("", id="hint", markup=True)
             yield Input(placeholder="Wallet name (e.g., Savings)", id="inp_name")
-            yield Input(placeholder="Secret key (edsk...)", id="inp_secret", password=True)
+            yield Input(placeholder="Secret key (edsk... or edesk...)", id="inp_secret", password=True)
             yield Input(
-                placeholder="Passphrase for encrypted secret (edsk)",
+                placeholder="Passphrase for encrypted secret (edesk, if applicable)",
                 id="inp_secret_pass",
                 password=True,
             )
@@ -2715,14 +2956,14 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
                 id="inp_mnemonic_path",
             )
             yield Input(placeholder="BIP39 passphrase (optional)", id="inp_mnemonic_pass", password=True)
-            yield Input(placeholder="Passphrase to encrypt", id="inp_passphrase", password=True)
+            yield Input(placeholder="Password to encrypt wallet", id="inp_passphrase", password=True)
             yield Static(
-                "[yellow]Passphrase encrypts keys (AES-256-GCM + scrypt).[/yellow]",
+                "[yellow]Password encrypts keys (AES-256-GCM + scrypt).[/yellow]",
                 id="secret_hint",
                 markup=True,
             )
             yield Static(
-                "[yellow]Passphrase encrypts keys (AES-256-GCM + scrypt).[/yellow]",
+                "[yellow]Password encrypts keys (AES-256-GCM + scrypt).[/yellow]",
                 id="mnemonic_store_hint",
                 markup=True,
             )
@@ -2738,7 +2979,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
                     id="bulk_hint",
                     markup=True,
                 )
-            yield Input(placeholder="Backup passphrase", id="inp_backup_pass", password=True)
+            yield Input(placeholder="Backup encryption password", id="inp_backup_pass", password=True)
             yield DirectoryTree(path=Path.home(), id="file_picker")
             with Horizontal(id="browse_row"):
                 yield Button("Select", id="select_file", variant="primary")
@@ -2751,7 +2992,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
     def on_mount(self) -> None:
         lv = self.query_one("#import_types", ListView)
         lv.clear()
-        for _type_id, title, desc in self.IMPORT_TYPES:
+        for _type_id, title, desc in _IMPORT_TYPE_OPTIONS:
             label_text = f"[b]{title}[/b]\n[dim]{desc}[/dim]"
             lv.append(ListItem(Label(label_text, markup=True)))
         lv.index = 0
@@ -2784,7 +3025,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
     @on(Input.Changed, "#inp_secret_pass")
     def secret_pass_changed(self, event: Input.Changed) -> None:
         secret = self.query_one("#inp_secret", Input).value.strip()
-        if not secret.startswith("edsk"):
+        if not secret.startswith("edesk"):
             return
         enc_pass = self.query_one("#inp_passphrase", Input)
         if not enc_pass.value.strip():
@@ -2957,7 +3198,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
             self._set_hidden(cancel_btn, False)
             file_picker.focus()
         elif self._step == "backup_pass":
-            title.update("[b]🔐 Backup Passphrase[/b]")
+            title.update("[b]🔐 Backup Encryption Password[/b]")
             hint.update("Unlock the recipe book.")
             self._set_hidden(inp_backup_pass, False)
             self._set_hidden(back_btn, False)
@@ -2967,15 +3208,26 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
 
     def _get_selected_type(self) -> Optional[str]:
         lv = self.query_one("#import_types", ListView)
-        idx = lv.index
-        if idx is None or idx < 0 or idx >= len(self.IMPORT_TYPES):
-            return None
-        return self.IMPORT_TYPES[idx][0]
+        return _selected_option_id(lv.index, _IMPORT_TYPE_OPTIONS)
 
     def _set_error(self, message: str) -> None:
         self.query_one("#error", Static).update(message)
 
     def _load_backup_file(self, path: Path) -> Optional[dict]:
+        try:
+            size_bytes = path.stat().st_size
+        except FileNotFoundError:
+            self._set_error("❌ Backup file not found.")
+            return None
+        except _LOCAL_IO_EXCEPTIONS as e:
+            self._set_error(f"❌ Failed to read backup metadata: {e}")
+            return None
+        if size_bytes > Config.BACKUP_MAX_FILE_BYTES:
+            self._set_error(
+                f"❌ Backup file too large ({size_bytes // 1024} KB). "
+                f"Max allowed is {Config.BACKUP_MAX_FILE_BYTES // 1024} KB."
+            )
+            return None
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -2985,7 +3237,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
         except json.JSONDecodeError:
             self._set_error("❌ Invalid backup file format.")
             return None
-        except Exception as e:
+        except _LOCAL_IO_EXCEPTIONS as e:
             self._set_error(f"❌ Failed to read backup: {e}")
             return None
         if not isinstance(data, dict):
@@ -3099,7 +3351,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
             if not name or not secret or not passphrase:
                 self._set_error("⚠️ Fill all fields to continue.")
                 return
-            if secret.startswith("edsk") and not secret_passphrase:
+            if secret.startswith("edesk") and not secret_passphrase:
                 self._set_error("⚠️ Passphrase required for encrypted secret key.")
                 return
             self.dismiss(
@@ -3132,7 +3384,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
                 self.query_one("#inp_mnemonic_path", Input).value.strip() if use_path else ""
             )
             if not name or not enc_passphrase:
-                self._set_error("⚠️ Name and passphrase required.")
+                self._set_error("⚠️ Name and password required.")
                 return
             mnemonic = self.query_one("#inp_mnemonic", Input).value.strip()
             if not mnemonic:
@@ -3172,11 +3424,9 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
         if self._step == "backup_pass":
             passphrase = self.query_one("#inp_backup_pass", Input).value.strip()
             if not passphrase:
-                self._set_error("⚠️ Passphrase required.")
+                self._set_error("⚠️ Encryption password required.")
                 return
             try:
-                from sassy_wallet.core.crypto import EncryptedBlob
-
                 backup_type = (self._backup_encrypted or {}).get("backup_type")
                 blob_dict = (self._backup_encrypted or {}).get("blob") or {}
                 blob = EncryptedBlob(
@@ -3185,11 +3435,17 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
                     ct_b64=blob_dict.get("ct_b64", ""),
                 )
                 payload_json = decrypt_secret(blob, passphrase)
+                if len(payload_json.encode("utf-8")) > Config.BACKUP_MAX_DECRYPTED_BYTES:
+                    self._set_error("❌ Decrypted backup payload is too large.")
+                    return
                 data = json.loads(payload_json)
+                if not isinstance(data, dict):
+                    self._set_error("❌ Backup payload is malformed.")
+                    return
                 if backup_type and not data.get("backup_type"):
                     data["backup_type"] = backup_type
-            except Exception:
-                self._set_error("❌ Wrong passphrase or corrupted backup.")
+            except _CRYPTO_DECODE_EXCEPTIONS + _LOCAL_IO_EXCEPTIONS:
+                self._set_error("❌ Wrong encryption password or corrupted backup.")
                 return
             self.dismiss({"mode": "backup", "backup_data": data})
 
@@ -3232,7 +3488,7 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
     def on_key(self, event) -> None:
         key = getattr(event, "key", None)
         if key == "escape":
-            self.dismiss(None)
+            self.cancel_pressed()
             event.stop()
             return
         if key == "space" and self._step == "mnemonic":
@@ -3313,18 +3569,6 @@ class ImportTypeSelectorScreen(ModalScreen[Optional[str]]):
     }
     """
 
-    IMPORT_TYPES = [
-        ("mnemonic12", "🧠 Import with 12 Words", "Default derivation"),
-        ("mnemonic24", "🧠 Import with 24 Words", "Default derivation"),
-        ("secret", "🔑 Import with Secret Key", "Full wallet - can send & receive"),
-        ("watch", "👀 Watch-Only Address", "Monitor only - cannot send"),
-        ("backup", "📦 From Backup File", "Restore from recipe book"),
-    ]
-
-    def __init__(self):
-        super().__init__()
-        self.selected_type: Optional[str] = None
-
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static("[b]🎯 Choose Import Method[/b]\nHow would you like to add your wallet?", id="title", markup=True)
@@ -3338,7 +3582,7 @@ class ImportTypeSelectorScreen(ModalScreen[Optional[str]]):
         lv = self.query_one("#import_types", ListView)
         lv.clear()
 
-        for type_id, title, description in self.IMPORT_TYPES:
+        for type_id, title, description in _IMPORT_TYPE_OPTIONS:
             label_text = f"[b]{title}[/b]\n[dim]{description}[/dim]"
             lv.append(ListItem(Label(label_text, markup=True)))
 
@@ -3347,10 +3591,7 @@ class ImportTypeSelectorScreen(ModalScreen[Optional[str]]):
 
     def _get_selected_type(self) -> Optional[str]:
         lv = self.query_one("#import_types", ListView)
-        idx = lv.index
-        if idx is None or idx < 0 or idx >= len(self.IMPORT_TYPES):
-            return None
-        return self.IMPORT_TYPES[idx][0]
+        return _selected_option_id(lv.index, _IMPORT_TYPE_OPTIONS)
 
     @on(Button.Pressed, "#select")
     def select_pressed(self) -> None:
@@ -3365,7 +3606,7 @@ class ImportTypeSelectorScreen(ModalScreen[Optional[str]]):
     def on_key(self, event) -> None:
         key = getattr(event, "key", None)
         if key == "backspace":
-            self.dismiss({"__BACK__": True})
+            self.dismiss({BACK_NAV_MARKER: True})
             event.stop()
             return
         if key == "escape":
@@ -3446,11 +3687,11 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
         with Vertical():
             yield Static("[b]🔑 Import with Secret Key[/b]\nEnter all fields to add your wallet.", id="title", markup=True)
             yield Input(placeholder="Wallet name (e.g., Savings)", id="inp_name")
-            yield Input(placeholder="Secret key (edsk...)", id="inp_secret", password=True)
-            yield Input(placeholder="Passphrase for encrypted secret (edsk)", id="inp_secret_pass", password=True)
-            yield Input(placeholder="Passphrase to encrypt", id="inp_passphrase", password=True)
+            yield Input(placeholder="Secret key (edsk... or edesk...)", id="inp_secret", password=True)
+            yield Input(placeholder="Passphrase for encrypted secret (edesk, if applicable)", id="inp_secret_pass", password=True)
+            yield Input(placeholder="Password to encrypt wallet", id="inp_passphrase", password=True)
             yield Static(
-                "[yellow]Passphrase encrypts keys (AES-256-GCM + scrypt).[/yellow]",
+                "[yellow]Password encrypts keys (AES-256-GCM + scrypt).[/yellow]",
                 id="secret_hint",
                 markup=True,
             )
@@ -3477,30 +3718,30 @@ class ImportSecretScreen(ModalScreen[Optional[dict]]):
                 "passphrase": passphrase,
             })
         elif event.button.id == "back":
-            self.dismiss({"__BACK__": True})
+            self.dismiss({BACK_NAV_MARKER: True})
         else:
             self.dismiss(None)
 
     @on(Input.Changed, "#inp_secret_pass")
     def secret_pass_changed(self, event: Input.Changed) -> None:
         secret = self.query_one("#inp_secret", Input).value.strip()
-        if not secret.startswith("edsk"):
+        if not secret.startswith("edesk"):
             return
         enc_pass = self.query_one("#inp_passphrase", Input)
         if not enc_pass.value.strip():
             enc_pass.value = event.value
 
     def on_key(self, event) -> None:
-        if isinstance(self.app.focused, Input):
-            if getattr(event, "key", None) == "escape":
-                try:
-                    self.query_one("#cancel", Button).focus()
-                except Exception as e:
-                    log_debug("Failed to focus cancel button in import secret screen", exception=str(e))
-                event.stop()
-                return
+        key = getattr(event, "key", None)
+        if _handle_input_escape_focus_cancel(
+            self,
+            event,
+            key,
+            context="import secret screen",
+            fallbacks=(("#ok", Button),),
+        ):
             return
-        if getattr(event, "key", None) == "escape":
+        if key == "escape":
             self.dismiss(None)
             event.stop()
 
@@ -3584,21 +3825,21 @@ class ImportWatchScreen(ModalScreen[Optional[dict]]):
                 "address": address,
             })
         elif event.button.id == "back":
-            self.dismiss({"__BACK__": True})
+            self.dismiss({BACK_NAV_MARKER: True})
         else:
             self.dismiss(None)
 
     def on_key(self, event) -> None:
-        if isinstance(self.app.focused, Input):
-            if getattr(event, "key", None) == "escape":
-                try:
-                    self.query_one("#cancel", Button).focus()
-                except Exception as e:
-                    log_debug("Failed to focus cancel button in import watch screen", exception=str(e))
-                event.stop()
-                return
+        key = getattr(event, "key", None)
+        if _handle_input_escape_focus_cancel(
+            self,
+            event,
+            key,
+            context="import watch screen",
+            fallbacks=(("#ok", Button),),
+        ):
             return
-        if getattr(event, "key", None) == "escape":
+        if key == "escape":
             self.dismiss(None)
             event.stop()
 
@@ -3698,8 +3939,9 @@ class WalletSelectorScreen(ModalScreen[Optional["Account"]]):
         self.dismiss(None)
 
     def on_key(self, event) -> None:
-        if getattr(event, "key", None) == "escape":
-            self.dismiss(None)
+        key = getattr(event, "key", None)
+        if key == "escape":
+            self.cancel_pressed()
             event.stop()
 
 
@@ -3894,7 +4136,7 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
         self._labels: list[Label] = []
         self._step: str = "select"
         self._mode: str | None = None
-        self._pass_hint: str = ""
+        self._backup_hint: str = ""
         self._backup_dir: Path = Path("data/backups")
         self._browse_open: bool = False
 
@@ -3908,8 +4150,8 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
                 yield Input(placeholder="Backup folder", id="inp_backup_dir")
                 yield Button("Browse", id="browse_dir", variant="warning")
             yield DirectoryTree(path=Path.home(), id="backup_dir_picker")
-            yield Input(placeholder="Create passphrase", password=True, id="inp_pass")
-            yield Input(placeholder="Confirm passphrase", password=True, id="inp_confirm")
+            yield Input(placeholder="Create encryption password", password=True, id="inp_pass")
+            yield Input(placeholder="Confirm encryption password", password=True, id="inp_confirm")
             yield Static("", id="pass_hint", markup=True)
             with Horizontal():
                 yield Button("Back", id="back", variant="default")
@@ -3954,7 +4196,7 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
         if self._step == "select":
             title.update("[b]Backup Wallets[/b]\nSelect one or many wallets")
             hint.update("Tip: Space/Enter to toggle. Use Select all for bulk backup.")
-            self._pass_hint = ""
+            self._backup_hint = ""
             pass_hint.update("")
             self._browse_open = False
             wallets.remove_class("hidden")
@@ -3972,10 +4214,10 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
             select_all.remove_class("hidden")
             wallets.focus()
         else:
-            title.update("[b]🔐 Backup Passphrase[/b]")
-            hint.update("Pick a folder and set a passphrase to protect your file with AES-256-GCM + scrypt.")
+            title.update("[b]🔐 Backup Encryption Password[/b]")
+            hint.update("Pick a folder and set an encryption password to protect your file with AES-256-GCM + scrypt.")
             pass_hint.remove_class("hidden")
-            pass_hint.update(self._pass_hint or "[dim]Encryption: AES-256-GCM + scrypt.[/dim]")
+            pass_hint.update(self._backup_hint or "[dim]Encryption: AES-256-GCM + scrypt.[/dim]")
             wallets.add_class("hidden")
             wallets_row.add_class("hidden")
             backup_path_row.remove_class("hidden")
@@ -4079,18 +4321,18 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
         confirm_passphrase = (inp_confirm.value or "").strip()
         pass_hint = self.query_one("#pass_hint", Static)
         if not backup_dir:
-            self._pass_hint = "⚠️ Choose a backup folder."
-            pass_hint.update(self._pass_hint)
+            self._backup_hint = "⚠️ Choose a backup folder."
+            pass_hint.update(self._backup_hint)
             inp_backup_dir.focus()
             return
         if not passphrase or not confirm_passphrase:
-            self._pass_hint = "⚠️ Both fields are required."
-            pass_hint.update(self._pass_hint)
+            self._backup_hint = "⚠️ Both fields are required."
+            pass_hint.update(self._backup_hint)
             inp_pass.focus()
             return
         if confirm_passphrase != passphrase:
-            self._pass_hint = "⚠️ Hey, this is serious stuff. Pay attention — both passphrases must match. 😅"
-            pass_hint.update(self._pass_hint)
+            self._backup_hint = "⚠️ Hey, this is serious stuff. Pay attention — both encryption passwords must match. 😅"
+            pass_hint.update(self._backup_hint)
             inp_pass.focus()
             return
         self._backup_dir = Path(backup_dir).expanduser()
@@ -4163,7 +4405,7 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
     def on_key(self, event) -> None:
         key = getattr(event, "key", None)
         if key == "escape":
-            self.dismiss(None)
+            self.cancel_pressed()
             event.stop()
             return
         if key == "enter" and self._step == "passphrase":
@@ -4172,20 +4414,9 @@ class BackupMultiSelectorScreen(ModalScreen[Optional[dict]]):
                 self._submit_backup()
                 event.stop()
                 return
-        if key in ("left", "right") and isinstance(self.app.focused, Button):
-            parent = self.app.focused.parent
-            if isinstance(parent, Horizontal):
-                focusables = [c for c in parent.children if isinstance(c, Button)]
-                if self.app.focused in focusables:
-                    idx = focusables.index(self.app.focused)
-                    if key == "left" and idx > 0:
-                        focusables[idx - 1].focus()
-                        event.stop()
-                        return
-                    if key == "right" and idx < len(focusables) - 1:
-                        focusables[idx + 1].focus()
-                        event.stop()
-                        return
+        if _move_focus_in_button_row(self.app.focused, key):
+            event.stop()
+            return
         if key in ("enter", "space"):
             if isinstance(self.app.focused, ListView):
                 lv = self.query_one("#wallets", ListView)
@@ -4372,9 +4603,8 @@ class ReceiveScreen(ModalScreen[None]):
         super().__init__()
         self.address = address
         self.accounts = accounts
-        self._status_timer = None
-        import random
-        self._fun_message = random.choice(self.RECEIVE_MESSAGES)
+        import secrets
+        self._fun_message = secrets.choice(self.RECEIVE_MESSAGES)
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -4403,11 +4633,8 @@ class ReceiveScreen(ModalScreen[None]):
             lv.append(ListItem(Label(label_text, markup=True)))
 
         # Preselect the current address if possible
-        try:
-            idx = next(i for i, acc in enumerate(self.accounts) if acc.address == self.address)
-            lv.index = idx
-        except StopIteration:
-            lv.index = 0
+        idx = next((i for i, acc in enumerate(self.accounts) if acc.address == self.address), 0)
+        lv.index = idx
         if self.accounts and lv.index is not None:
             self._set_address(self.accounts[lv.index].address)
 
@@ -4417,7 +4644,7 @@ class ReceiveScreen(ModalScreen[None]):
             self.query_one("#address_text", Static).update(
                 f"[b]{self.address}[/b]\n[dim]👆 Share this address to receive XTZ[/dim]"
             )
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_debug("Failed to update receive address text", exception=str(e), address=address)
 
     @on(ListView.Selected, "#wallet_selector")
@@ -4429,8 +4656,9 @@ class ReceiveScreen(ModalScreen[None]):
             self._set_address(self.accounts[idx].address)
 
     def on_key(self, event) -> None:
-        if getattr(event, "key", None) == "escape":
-            self.dismiss(None)
+        key = getattr(event, "key", None)
+        if key == "escape":
+            self.cancel_pressed()
             event.stop()
 
     @on(Button.Pressed, "#copy")
@@ -4438,7 +4666,7 @@ class ReceiveScreen(ModalScreen[None]):
         try:
             self.app.copy_to_clipboard(self.address)  # type: ignore[attr-defined]
             self.app._set_status(f"✅ Address copied: {self.address}")  # type: ignore[attr-defined]
-        except Exception as e:
+        except (RuntimeError, OSError, ValueError, ImportError) as e:
             log_warning("Clipboard copy failed", exception=e, address=self.address)
             self.app._set_status(f"❌ Copy failed. Address: {self.address}")  # type: ignore[attr-defined]
 
@@ -4618,10 +4846,15 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         align: center middle;
     }
 
+    StakeScreen #stake_root.hidden {
+        display: none;
+    }
+
     StakeScreen > Vertical {
         width: auto;
         min-width: 65;
         max-width: 80;
+        min-height: 22;
         height: auto;
         max-height: 30;
         overflow-y: auto;
@@ -4656,7 +4889,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         background: $panel;
     }
 
-    StakeScreen #info_box {
+    StakeScreen #info_row {
         margin-bottom: 1;
         padding: 1 2;
         height: auto;
@@ -4664,6 +4897,21 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         border: solid #374151;
         display: none;
         text-align: left;
+    }
+
+    StakeScreen #info_box {
+        width: 1fr;
+    }
+
+    StakeScreen #change_baker_btn {
+        margin-left: 2;
+        background: #2563eb;
+        color: #f8fafc;
+    }
+
+    StakeScreen #change_baker_btn:hover {
+        background: #1d4ed8;
+        color: #f8fafc;
     }
 
     StakeScreen #input_container {
@@ -4776,17 +5024,20 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         self.balance_xtz: Decimal = Decimal(0)
         self.delegate_addr: Optional[str] = None
         self.staked_mutez: int = 0
+        self.staking_active: bool = False
         self.is_delegated: bool = False
         self._delegation_pending: bool = False
+        self._change_baker_mode: bool = False
         self._polling_timer = None
         self._blocked_new_wallet: bool = False
         # Cache wallet info to avoid re-fetching when selecting
         self._wallet_info_cache: dict[str, dict] = wallet_info_cache if wallet_info_cache is not None else {}
         self._initial_ctx = initial_ctx or {}
         self._wallet_selector_target_index: int = 0
+        self._stake_status_grace_seconds: float = 180.0
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with Vertical(id="stake_root"):
             yield Static("[b]⚡ Stake Manager[/b]", id="title", markup=True)
 
             # Wallet selector
@@ -4794,8 +5045,11 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             yield ListView(id="wallet_selector")
             yield Static("💡 Who’s the lucky wallet becoming a staking CHAD today? Let’s lock in some XTZ! 💪", id="fun_note", markup=True)
 
-            # Info box (hidden initially, shown after wallet selection)
-            yield Static("", id="info_box", markup=True)
+            # Info row (hidden initially, shown after wallet selection)
+            with Horizontal(id="info_row"):
+                yield Static("", id="info_box", markup=True)
+                # Inline "Change Baker" to avoid changing modal size
+                yield Button("Change Baker", id="change_baker_btn", variant="default")
 
             # Input container (hidden initially)
             with Vertical(id="input_container"):
@@ -4830,20 +5084,29 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 cached_info = self._wallet_info_cache.get(acc.address)
                 if cached_info:
                     staked_mutez = cached_info.get("staked_mutez", 0)
+                    staking_active = bool(cached_info.get("staking_active"))
                     delegate_addr = cached_info.get("delegate_addr")
                     balance_mutez = cached_info.get("balance_mutez", 0)
                     balance_xtz = mutez_to_xtz(balance_mutez)
                     balance_tag = f"[#34d399]{format_xtz(balance_xtz)} ꜩ[/#34d399]"
                     if staked_mutez > 0:
                         staked_xtz = mutez_to_xtz(staked_mutez)
-                        status_line = f"{balance_tag} [#8b5cf6]{format_xtz(staked_xtz)} STK[/#8b5cf6]"
+                        if delegate_addr:
+                            status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
+                        else:
+                            status_line = f"{balance_tag} [#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
+                    elif staking_active:
+                        if delegate_addr:
+                            status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]0 Staked[/#8b5cf6]"
+                        else:
+                            status_line = f"{balance_tag} [#8b5cf6]0 Staked[/#8b5cf6]"
                     elif delegate_addr:
-                        status_line = f"{balance_tag} [yellow]DLG[/yellow] [dim]STK -[/dim]"
+                        status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]0 Staked[/#8b5cf6]"
                     else:
                         if balance_mutez <= 0:
                             status_line = f"{balance_tag} [#f97316]NEW WALLET[/#f97316]"
                         else:
-                            status_line = f"{balance_tag} [dim]STK -[/dim]"
+                            status_line = f"{balance_tag} [red]NOT DELEGATED[/red]"
                     label_text = f"[b]{acc.name}[/b] {status_line}\n[dim]{addr_short}[/dim]"
                 else:
                     fun_msg = get_wallet_loading_message()
@@ -4886,7 +5149,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             if amount is not None:
                 input_field = self.query_one("#input_field", Input)
                 input_field.value = str(amount)
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to restore stake context", exception=e)
 
     def _apply_wallet_selector_index(self) -> None:
@@ -4896,7 +5159,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 return
             idx = max(0, min(self._wallet_selector_target_index, len(lv.children) - 1))
             lv.index = idx
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to reset wallet selector index", exception=e)
 
     def _load_wallet_statuses(self) -> None:
@@ -4913,16 +5176,39 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     f"{spin} [b]{acc.name}[/b] [dim]Loading... ꜩ[/dim] [dim]STK ...[/dim]\n[dim]{addr_short}[/dim]",
                 )
 
-                # Fetch delegation and staking status (blocking calls, but in worker thread)
-                delegate_addr = get_delegation_info(self.rpc, acc.address)
-                staked_mutez = get_staking_balance(self.rpc, acc.address)
-                balance_mutez = get_balance_mutez(self.rpc, acc.address)
+                # Fetch delegation + staking from a single on-chain snapshot (prefer RPC),
+                # forced refresh to reduce stale reads after external wallet actions.
+                state = get_wallet_chain_state(
+                    self.rpc,
+                    acc.address,
+                    force_refresh=True,
+                    prefer_rpc=True,
+                )
+                delegate_addr = state.get("delegate")
+                staked_mutez = int(state.get("staked_mutez") or 0)
+                staking_active = bool(state.get("staking_active"))
+                balance_mutez = int(state.get("balance_mutez") or 0)
+                if balance_mutez <= 0:
+                    balance_mutez = get_balance_mutez(self.rpc, acc.address)
+
+                # If stake recently existed, don't immediately downgrade to 0 (TzKT can lag right after a baker change).
+                prev = self._wallet_info_cache.get(acc.address) or {}
+                now_ts = time.time()
+                prev_staked = int(prev.get("staked_mutez") or 0)
+                prev_seen = prev.get("staked_seen_at")
+                if prev_staked > 0 and staked_mutez == 0 and isinstance(prev_seen, (int, float)):
+                    if now_ts - float(prev_seen) < self._stake_status_grace_seconds:
+                        staked_mutez = prev_staked
+                        staking_active = True
 
                 # Cache the info for instant access when selecting
                 self._wallet_info_cache[acc.address] = {
                     "delegate_addr": delegate_addr,
                     "staked_mutez": staked_mutez,
+                    "staking_active": staking_active,
                     "balance_mutez": balance_mutez,
+                    "fetched_at": time.time(),
+                    "staked_seen_at": time.time() if staked_mutez > 0 else prev.get("staked_seen_at"),
                 }
 
                 # Build status tags
@@ -4930,18 +5216,27 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 balance_tag = f"[#34d399]{format_xtz(balance_xtz)} ꜩ[/#34d399]"
                 if staked_mutez > 0:
                     staked_xtz = mutez_to_xtz(staked_mutez)
-                    status_line = f"{balance_tag} [#8b5cf6]{format_xtz(staked_xtz)} STK[/#8b5cf6]"
+                    if delegate_addr:
+                        status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
+                    else:
+                        status_line = f"{balance_tag} [#8b5cf6]{format_xtz_precise(staked_xtz)} Staked[/#8b5cf6]"
+                elif staking_active:
+                    # Best-effort: some indexers lag on stakedBalance; keep a numeric placeholder.
+                    if delegate_addr:
+                        status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]0 Staked[/#8b5cf6]"
+                    else:
+                        status_line = f"{balance_tag} [#8b5cf6]0 Staked[/#8b5cf6]"
                 elif delegate_addr:
-                    status_line = f"{balance_tag} [yellow]DLG[/yellow] [dim]STK -[/dim]"
+                    status_line = f"{balance_tag} [yellow]Delegated[/yellow] [#8b5cf6]0 Staked[/#8b5cf6]"
                 else:
                     if balance_mutez <= 0:
                         status_line = f"{balance_tag} [#f97316]NEW WALLET[/#f97316]"
                     else:
-                        status_line = f"{balance_tag} [dim]STK -[/dim]"
+                        status_line = f"{balance_tag} [red]NOT DELEGATED[/red]"
 
                 label_text = f"[b]{acc.name}[/b] {status_line}\n[dim]{addr_short}[/dim]"
 
-            except Exception as e:
+            except _FLOW_TASK_EXCEPTIONS as e:
                 log_error(f"Failed to fetch status for {acc.name}", exception=e)
                 label_text = f"[b]{acc.name}[/b] [red]⚠️ Error loading status[/red]\n[dim]{addr_short}[/dim]"
 
@@ -4957,31 +5252,44 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 item = list_items[idx]
                 label = item.query_one(Label)
                 label.update(label_text)
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update wallet selector row", exception=e)
+
+    async def _push_hidden_screen(self, screen) -> Any:
+        """Push a modal screen while hiding the StakeScreen root to avoid flashes."""
+        root = None
+        try:
+            root = self.query_one("#stake_root", Vertical)
+            root.add_class("hidden")
+        except _UI_QUERY_EXCEPTIONS:
+            root = None
+        try:
+            return await self.app.push_screen_wait(screen)  # type: ignore[attr-defined]
+        finally:
+            if root is not None:
+                try:
+                    root.remove_class("hidden")
+                except _UI_QUERY_EXCEPTIONS as e:
+                    log_debug("Failed to restore stake root visibility", exception=str(e))
+
     def on_key(self, event) -> None:
-        # CRITICAL: Don't capture keys in these scenarios
-        from textual.widgets import Input
-        from textual.screen import ModalScreen
+        # Only handle keys when this screen is the active/top screen.
+        # Prevents accidental key handling while other modals (passphrase/confirm) are open.
+        if self.app.screen is not self:
+            return
 
         key = getattr(event, "key", None)
 
         # 🚫 If focus is on an Input widget, let it handle keys naturally
         # Only intercept Escape for cancel functionality
-        if isinstance(self.app.focused, Input):
-            if key == "escape":
-                try:
-                    self.query_one("#cancel", Button).focus()
-                except Exception as e:
-                    log_debug("Failed to focus cancel button in stake screen", exception=str(e))
-                event.stop()
+        if _handle_input_escape_focus_cancel(
+            self,
+            event,
+            key,
+            context="stake screen",
+            fallbacks=(("#select_wallet_btn", Button),),
+        ):
             # For all other keys, let Input handle them naturally (NO event.stop())
-            return
-
-        # 🚫 If a modal is open (check if screen stack has another modal on top)
-        # The active screen should be THIS screen if no modal is open
-        if self.app.screen is not self:
-            event.stop()
             return
 
         # Valid navigation from here
@@ -4989,16 +5297,12 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         if key == "escape":
             self.cancel_pressed()
             return
-        if key == "backspace" and self.selected_account:
+        # Avoid accidental reset to wallet selector from buffered backspace events
+        # after nested modal transitions (passphrase/confirm screens).
+        if key == "ctrl+b" and self.selected_account:
             self._go_back_to_selector()
             event.stop()
             return
-
-    @on(ListView.Selected, "#wallet_selector")
-    def wallet_selected(self, event: ListView.Selected) -> None:
-        """Handle wallet highlighting from ListView (no auto-advance)."""
-        # Just highlight, don't advance automatically
-        pass
 
     @on(Button.Pressed, "#select_wallet_btn")
     def select_wallet_pressed(self) -> None:
@@ -5011,19 +5315,14 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 balance_mutez = cached_info.get("balance_mutez")
                 if balance_mutez is None:
                     balance_mutez = get_balance_mutez(self.rpc, account.address)
-                try:
-                    from sassy_wallet.core.tezos import has_outgoing_tx
-                    has_outgoing = has_outgoing_tx(self.rpc, account.address)
-                except Exception:
-                    has_outgoing = True
+                has_outgoing = self._has_outgoing_activity(account.address)
                 if balance_mutez <= 0 or not has_outgoing:
                     self.query_one("#fun_note", Static).update(
-                        "[red]⚠️ You need a positive balance and at least one outgoing transfer "
-                        "before you can delegate or stake.[/red]"
+                        f"[red]{_STAKE_OUTGOING_REQUIRED_MSG}[/red]"
                     )
                     return
                 self._select_wallet(lv.index)
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS + _FLOW_TASK_EXCEPTIONS as e:
             log_error("Failed to select wallet", exception=e)
 
     def _select_wallet(self, index: int) -> None:
@@ -5043,38 +5342,48 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 self.balance_xtz = mutez_to_xtz(cached_info["balance_mutez"])
                 self.delegate_addr = cached_info["delegate_addr"]
                 self.staked_mutez = cached_info["staked_mutez"]
+                self.staking_active = bool(cached_info.get("staking_active")) or self.staked_mutez > 0
                 self.is_delegated = bool(self.delegate_addr)
             else:
                 # Fallback: fetch if cache miss (shouldn't happen normally)
-                balance_mutez = get_balance_mutez(self.rpc, self.selected_account.address)
+                state = get_wallet_chain_state(
+                    self.rpc,
+                    self.selected_account.address,
+                    force_refresh=True,
+                    prefer_rpc=True,
+                )
+                balance_mutez = int(state.get("balance_mutez") or 0)
                 self.balance_xtz = mutez_to_xtz(balance_mutez)
-                self.delegate_addr = get_delegation_info(self.rpc, self.selected_account.address)
-                self.staked_mutez = get_staking_balance(self.rpc, self.selected_account.address)
+                self.delegate_addr = state.get("delegate")
+                self.staked_mutez = int(state.get("staked_mutez") or 0)
+                self.staking_active = bool(state.get("staking_active")) or self.staked_mutez > 0
                 self.is_delegated = bool(self.delegate_addr)
 
-            try:
-                from sassy_wallet.core.tezos import has_outgoing_tx
-                has_outgoing = has_outgoing_tx(self.rpc, self.selected_account.address)
-            except Exception:
-                has_outgoing = True
+            has_outgoing = self._has_outgoing_activity(self.selected_account.address)
             if self.balance_xtz <= 0 or not has_outgoing:
                 self._blocked_new_wallet = True
 
             self._update_view()
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS + _FLOW_TASK_EXCEPTIONS as e:
             log_error("Failed to fetch wallet info", exception=e)
             status_widget = self.query_one("#status_msg", Static)
             status_widget.update(f"[red]❌ Failed to fetch wallet info: {str(e)}[/red]")
 
     def _go_back_to_selector(self) -> None:
         """Go back to wallet selector screen."""
+        log_warning(
+            "StakeScreen switching back to wallet selector",
+            selected_address=getattr(self.selected_account, "address", ""),
+        )
         # Reset state
         self.selected_account = None
         self.balance_xtz = Decimal(0)
         self.delegate_addr = None
         self.staked_mutez = 0
+        self.staking_active = False
         self.is_delegated = False
         self._delegation_pending = False
+        self._change_baker_mode = False
 
         # Note: Don't clear cache - keep it for fast re-selection
         # Cache will be refreshed when modal is reopened
@@ -5092,7 +5401,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             self.query_one("#wallet_selector", ListView).display = True
             self.query_one("#wallet_selector_label", Static).display = True
             self.query_one("#fun_note", Static).display = True
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to show wallet selector", exception=e)
         self._wallet_selector_target_index = 0
         self.set_timer(0.01, self._apply_wallet_selector_index)
@@ -5100,15 +5409,15 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         # Show Select button
         try:
             self.query_one("#select_wallet_btn", Button).display = True
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to show select button", exception=e)
 
         # Clear and hide info box
         try:
             info_widget = self.query_one("#info_box", Static)
             info_widget.update("")
-            info_widget.display = False
-        except Exception as e:
+            self.query_one("#info_row", Horizontal).display = False
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to clear info box", exception=e)
 
         # Hide and clear input container
@@ -5118,13 +5427,13 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             self.query_one("#input_field", Input).value = ""
             self.query_one("#input_field", Input).placeholder = ""
             self.query_one("#input_hint", Static).update("")
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to hide/clear input container", exception=e)
 
         # Clear status
         try:
             self.query_one("#status_msg", Static).update("")
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to clear status", exception=e)
 
         # Reset buttons - hide all action buttons
@@ -5139,7 +5448,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 self.query_one("#delegate_btn", Button).display = False
                 self.query_one("#stake_btn", Button).display = False
                 self.query_one("#unstake_btn", Button).display = False
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_error("Failed to reset buttons", exception=e)
 
         self.call_later(reset_buttons)
@@ -5156,7 +5465,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 self.query_one("#wallet_selector_label", Static).display = False
                 self.query_one("#fun_note", Static).display = False
                 self.query_one("#select_wallet_btn", Button).add_class("hidden")
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_error("Failed to hide wallet selector", exception=e)
 
             # Show input container and prepare input field
@@ -5167,7 +5476,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 # Pre-configure input field
                 input_field = self.query_one("#input_field", Input)
                 input_field.disabled = False
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_error("Failed to show input container", exception=e)
 
             # Update info box - ALWAYS show wallet details
@@ -5207,7 +5516,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
 
             info_text = "\n".join(info_lines)
             info_widget.update(info_text)
-            info_widget.display = True
+            self.query_one("#info_row", Horizontal).display = True
 
             # Update input container
             input_label = self.query_one("#input_label", Static)
@@ -5217,19 +5526,26 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             # Always clear the input field when updating view
             input_field.value = ""
 
-            if not self.is_delegated and not self._delegation_pending:
-                # Not delegated - show baker input
-                input_label.update("[b]Enter Baker Address:[/b]")
-                input_field.placeholder = "tz1... or tz2... or tz3... or tz4..."
-                input_field.disabled = False
-                input_hint.update("[dim]Find bakers at baking-bad.org or tzkt.io[/dim]")
-                self.query_one("#amount_comment", Static).update("")
-            elif self._delegation_pending:
+            if self._delegation_pending:
                 # Delegation pending - show waiting message
                 input_label.update("[b]⏳ Waiting for confirmation...[/b]")
                 input_field.placeholder = "Please wait..."
                 input_field.disabled = True
                 input_hint.update("[dim]Processing delegation (30-60 seconds)...[/dim]")
+                self.query_one("#amount_comment", Static).update("")
+            elif self._change_baker_mode:
+                # Delegated, but user wants to switch baker
+                input_label.update("[b]Enter New Baker Address:[/b]")
+                input_field.placeholder = "tz1... or tz2... or tz3... or tz4..."
+                input_field.disabled = False
+                input_hint.update("[dim]Paste the new baker address (you can find bakers on tzkt.io).[/dim]")
+                self.query_one("#amount_comment", Static).update("")
+            elif not self.is_delegated:
+                # Not delegated - show baker input
+                input_label.update("[b]Enter Baker Address:[/b]")
+                input_field.placeholder = "tz1... or tz2... or tz3... or tz4..."
+                input_field.disabled = False
+                input_hint.update("[dim]Must delegate before staking. Find bakers at baking-bad.org or tzkt.io[/dim]")
                 self.query_one("#amount_comment", Static).update("")
             else:
                 # Delegated - show amount input
@@ -5254,35 +5570,59 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     delegate_btn = self.query_one("#delegate_btn", Button)
                     stake_btn = self.query_one("#stake_btn", Button)
                     unstake_btn = self.query_one("#unstake_btn", Button)
+                    change_baker_btn = self.query_one("#change_baker_btn", Button)
 
                     # Hide all action buttons first
                     delegate_btn.display = False
                     stake_btn.display = False
                     unstake_btn.display = False
+                    change_baker_btn.display = False
 
                     # Show/configure buttons based on state
-                    if not self.is_delegated and not self._delegation_pending:
-                        # Not delegated - show Delegate button
-                        delegate_btn.display = True
-                        delegate_btn.disabled = False
-                        delegate_btn.label = "Delegate"
-                    elif self._delegation_pending:
+                    if self._delegation_pending:
                         # Delegation pending
                         delegate_btn.display = True
                         delegate_btn.disabled = True
                         delegate_btn.label = "Delegating..."
-                    elif self.staked_mutez > 0:
+                    elif self._change_baker_mode:
+                        delegate_btn.display = True
+                        # Only enable when the new baker address is valid.
+                        try:
+                            current_val = sanitize_input(self.query_one("#input_field", Input).value)
+                            is_valid, _ = validate_baker_address(current_val)
+                            delegate_btn.disabled = not is_valid
+                        except _UI_QUERY_EXCEPTIONS:
+                            delegate_btn.disabled = True
+                        delegate_btn.label = "Change Baker"
+
+                        # Hide the toggle button while in change-baker mode; the modal Back button
+                        # is enough and avoids redundant controls.
+                        change_baker_btn.display = False
+                    elif not self.is_delegated:
+                        # Not delegated - show Delegate button
+                        delegate_btn.display = True
+                        delegate_btn.disabled = False
+                        delegate_btn.label = "Delegate"
+                    elif self.staking_active:
                         # Already staking - show Stake and Unstake
+                        change_baker_btn.display = True
+                        change_baker_btn.disabled = False
+                        change_baker_btn.label = "Change Baker"
+
                         stake_btn.display = True
                         stake_btn.disabled = False
                         unstake_btn.display = True
                         unstake_btn.disabled = False
                     else:
                         # Delegated but not staking - show Stake button
+                        change_baker_btn.display = True
+                        change_baker_btn.disabled = False
+                        change_baker_btn.label = "Change Baker"
+
                         stake_btn.display = True
                         stake_btn.disabled = False
 
-                except Exception as e:
+                except _UI_QUERY_EXCEPTIONS as e:
                     log_error("Failed to update buttons", exception=e)
 
             self.call_later(update_buttons)
@@ -5293,13 +5633,13 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     input_field = self.query_one("#input_field", Input)
                     if not input_field.disabled:
                         input_field.focus()
-                except Exception as e:
+                except _UI_QUERY_EXCEPTIONS as e:
                     log_error("Failed to focus input field", exception=e)
 
             # Use set_timer to ensure DOM is fully rendered
             self.set_timer(0.1, focus_input)
 
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS + _FLOW_TASK_EXCEPTIONS as e:
             log_error("Failed to update view", exception=e)
             status_widget = self.query_one("#status_msg", Static)
             status_widget.update(f"[red]❌ Error updating view: {str(e)}[/red]")
@@ -5312,7 +5652,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
 
         input_field = self.query_one("#input_field", Input)
         value = event.value
-        if self.is_delegated and not self._delegation_pending:
+        expects_amount = self.is_delegated and not self._change_baker_mode and not self._delegation_pending
+        if expects_amount:
             filtered = filter_amount_input(value)
             if filtered != value:
                 input_field.value = filtered
@@ -5327,7 +5668,9 @@ class StakeScreen(ModalScreen[Optional[dict]]):
 
         # If input is empty, show default hint
         if not value:
-            if not self.is_delegated and not self._delegation_pending:
+            if self._change_baker_mode and not self._delegation_pending:
+                input_hint.update("[dim]Paste the new baker address (tz1.../tz2.../tz3.../tz4...).[/dim]")
+            elif not expects_amount and not self._delegation_pending:
                 input_hint.update("[dim]Must delegate before staking. Find bakers at baking-bad.org or tzkt.io[/dim]")
             elif not self._delegation_pending:
                 input_hint.update("")
@@ -5335,7 +5678,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             return
 
         # Validate based on current state
-        if not self.is_delegated and not self._delegation_pending:
+        if not expects_amount and not self._delegation_pending:
             # Validating baker address
             is_valid, error_msg = validate_baker_address(value)
             if is_valid:
@@ -5348,6 +5691,13 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     input_hint.update(f"[red]✗ {error_msg}[/red]")
                 else:
                     input_hint.update("[dim]Enter complete baker address (36 characters)[/dim]")
+            # In change-baker mode, only enable the action button when the address is valid
+            if self._change_baker_mode:
+                try:
+                    btn = self.query_one("#delegate_btn", Button)
+                    btn.disabled = not is_valid
+                except _UI_QUERY_EXCEPTIONS as e:
+                    log_debug("Failed to toggle delegate button state", exception=str(e))
         elif not self._delegation_pending:
             # Validating amount
             is_valid, error_msg, amount = validate_amount(value, min_value=Decimal("0"))
@@ -5385,7 +5735,144 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     input_hint.update(f"[dim]💡 Available: {format_xtz(self.balance_xtz)} XTZ | Staked: {format_xtz(staked_xtz)} XTZ[/dim]")
                     self.query_one("#amount_comment", Static).update("")
 
-    @work(exclusive=False, thread=True)
+    async def _refresh_selected_chain_state(self, *, force_refresh: bool, preserve_input: bool) -> bool:
+        """Refresh selected wallet's delegation + staking state (best-effort)."""
+        if not self.selected_account:
+            return False
+
+        addr = self.selected_account.address
+        input_field = self.query_one("#input_field", Input)
+        prev_value = input_field.value if preserve_input else ""
+
+        prev = self._wallet_info_cache.get(addr) or {}
+        prev_staked = int(prev.get("staked_mutez") or 0)
+        prev_seen = prev.get("staked_seen_at")
+        now_ts = time.time()
+
+        try:
+            state = await asyncio.to_thread(
+                get_wallet_chain_state,
+                self.rpc,
+                addr,
+                force_refresh=force_refresh,
+                prefer_rpc=True,
+            )
+            delegate_addr = state.get("delegate")
+            balance_mutez = int(state.get("balance_mutez") or 0)
+            staked_mutez = int(state.get("staked_mutez") or 0)
+            staking_active = bool(state.get("staking_active")) or (staked_mutez > 0)
+        except _FLOW_TASK_EXCEPTIONS as e:
+            log_debug("Failed to refresh wallet chain state", exception=str(e), address=addr)
+            return False
+
+        # If stake recently existed, don't immediately downgrade to 0 (TzKT can lag right after a baker change).
+        if prev_staked > 0 and staked_mutez == 0 and isinstance(prev_seen, (int, float)):
+            if now_ts - float(prev_seen) < self._stake_status_grace_seconds:
+                staked_mutez = prev_staked
+                staking_active = True
+
+        self.delegate_addr = delegate_addr
+        self.is_delegated = bool(delegate_addr)
+        self.staked_mutez = staked_mutez
+        self.staking_active = staking_active
+        self.balance_xtz = mutez_to_xtz(balance_mutez)
+        self._wallet_info_cache[addr] = {
+            "delegate_addr": delegate_addr,
+            "staked_mutez": staked_mutez,
+            "staking_active": staking_active,
+            "balance_mutez": balance_mutez,
+            "fetched_at": now_ts,
+            "staked_seen_at": now_ts if staked_mutez > 0 else prev.get("staked_seen_at"),
+        }
+        self._update_view()
+        if preserve_input:
+            try:
+                self.query_one("#input_field", Input).value = prev_value
+            except _UI_QUERY_EXCEPTIONS as e:
+                log_debug("Failed to restore input field after refresh", exception=str(e))
+        return True
+
+    async def _confirm_pending_ops_or_abort(
+        self,
+        *,
+        cancel_message: str,
+        detailed: bool = False,
+    ) -> bool:
+        if not self.selected_account:
+            return True
+
+        pending_info = check_pending_operations(self.rpc, self.selected_account.address)
+        if not pending_info or not pending_info.get("has_pending"):
+            return True
+
+        pending_count = pending_info.get("pending_count", 0)
+        if detailed:
+            operations = pending_info.get("operations", [])
+            ops_details: list[str] = []
+            for op in operations[:3]:
+                kind = op.get("kind", "unknown")
+                counter = op.get("counter", "?")
+                hash_short = op.get("hash", "unknown")[:16]
+                ops_details.append(f"  • {kind} (counter: {counter}) - {hash_short}...")
+            ops_text = "\n".join(ops_details)
+            if len(operations) > 3:
+                ops_text += f"\n  ... and {len(operations) - 3} more"
+            warning_msg = (
+                f"⚠️ [b]Pending Transactions Detected![/b]\n\n"
+                f"Found {pending_count} pending operation(s) for this wallet:\n\n"
+                f"{ops_text}\n\n"
+                f"These transactions are waiting to be confirmed in the blockchain.\n"
+                f"Attempting to proceed now may cause counter errors.\n\n"
+                f"[b]Recommendations:[/b]\n"
+                f"• Wait 1-2 minutes for pending operations to confirm\n"
+                f"• Check your transaction history\n"
+                f"• Try again after pending operations clear\n\n"
+                f"Do you want to proceed anyway? (Not recommended)"
+            )
+        else:
+            warning_msg = (
+                f"⚠️ [b]Pending Transactions Detected![/b]\n\n"
+                f"Found {pending_count} pending operation(s) for this wallet.\n"
+                f"Proceeding may cause counter errors.\n\n"
+                f"Wait 1-2 minutes for operations to confirm, then try again.\n\n"
+                f"Proceed anyway? (Not recommended)"
+            )
+
+        proceed = await self.app.push_screen_wait(ConfirmScreen(warning_msg))
+        if proceed:
+            return True
+        self._show_error(cancel_message)
+        return False
+
+    def _has_outgoing_activity(self, address: str) -> bool:
+        try:
+            return has_outgoing_tx(self.rpc, address)
+        except _FLOW_PRECHECK_EXCEPTIONS:
+            return True
+
+    @work(exclusive=True)
+    @on(Button.Pressed, "#change_baker_btn")
+    async def change_baker_pressed(self) -> None:
+        """Toggle change-baker mode (uses the same input field)."""
+        if not self.selected_account:
+            return
+        if self._delegation_pending:
+            return
+
+        if self._change_baker_mode:
+            self._change_baker_mode = False
+            self._update_view()
+            return
+
+        # Refresh state first so we show the current baker even if it changed elsewhere.
+        await self._refresh_selected_chain_state(force_refresh=True, preserve_input=False)
+        self._change_baker_mode = True
+        self._update_view()
+        try:
+            self.query_one("#delegate_btn", Button).disabled = True
+        except _UI_QUERY_EXCEPTIONS as e:
+            log_debug("Failed to disable delegate button in change-baker mode", exception=str(e))
+
     @work(exclusive=True)
     @on(Button.Pressed, "#delegate_btn")
     async def delegate_pressed(self) -> None:
@@ -5393,16 +5880,9 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         if not self.selected_account:
             self._show_error("⚠️ Select a wallet first.")
             return
-        try:
-            from sassy_wallet.core.tezos import has_outgoing_tx
-            has_outgoing = has_outgoing_tx(self.rpc, self.selected_account.address)
-        except Exception:
-            has_outgoing = True
+        has_outgoing = self._has_outgoing_activity(self.selected_account.address)
         if self.balance_xtz <= 0 or not has_outgoing:
-            self._show_error(
-                "⚠️ You need a positive balance and at least one outgoing transfer "
-                "before you can delegate or stake."
-            )
+            self._show_error(_STAKE_OUTGOING_REQUIRED_MSG)
             return
 
         input_field = self.query_one("#input_field", Input)
@@ -5418,239 +5898,553 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             self._show_error(f"⚠️ {error_msg}")
             return
 
-        # Check for pending transactions before attempting delegation
-        from sassy_wallet.core.tezos import check_pending_operations
-        pending_info = check_pending_operations(self.rpc, self.selected_account.address)
+        if not await self._confirm_pending_ops_or_abort(
+            cancel_message="⏸️ Delegation cancelled - waiting for pending operations",
+            detailed=True,
+        ):
+            return
 
-        if pending_info and pending_info.get('has_pending'):
-            # Show warning about pending transactions
-            pending_count = pending_info.get('pending_count', 0)
-            operations = pending_info.get('operations', [])
-
-            # Build warning message
-            ops_details = []
-            for op in operations[:3]:  # Show max 3 operations
-                kind = op.get('kind', 'unknown')
-                counter = op.get('counter', '?')
-                hash_short = op.get('hash', 'unknown')[:16]
-                ops_details.append(f"  • {kind} (counter: {counter}) - {hash_short}...")
-
-            ops_text = "\n".join(ops_details)
-            if len(operations) > 3:
-                ops_text += f"\n  ... and {len(operations) - 3} more"
-
-            warning_msg = (
-                f"⚠️ [b]Pending Transactions Detected![/b]\n\n"
-                f"Found {pending_count} pending operation(s) for this wallet:\n\n"
-                f"{ops_text}\n\n"
-                f"These transactions are waiting to be confirmed in the blockchain.\n"
-                f"Attempting to delegate now may cause counter errors.\n\n"
-                f"[b]Recommendations:[/b]\n"
-                f"• Wait 1-2 minutes for pending operations to confirm\n"
-                f"• Check your transaction history\n"
-                f"• Try again after pending operations clear\n\n"
-                f"Do you want to proceed anyway? (Not recommended)"
-            )
-
-            # Show confirmation dialog
-            proceed = await self.app.push_screen_wait(ConfirmScreen(warning_msg))
-
-            if not proceed:
-                self._show_error("⏸️ Delegation cancelled - waiting for pending operations")
-                return
-
-        # Try to get baker name from known bakers (if available)
+        # Resolve baker alias for a friendlier confirmation summary.
         baker_name = "Unknown Baker"
         try:
-            from sassy_wallet.core.tezos import KNOWN_BAKERS
-            for baker in KNOWN_BAKERS:
-                if baker.get("address") == value:
-                    baker_name = baker.get("name", "Unknown Baker")
-                    break
-        except Exception as e:
-            log_debug("Failed to load known bakers list", exception=str(e))
+            baker_info = get_baker_info(self.rpc, value, force_refresh=True) or {}
+            baker_name = str(baker_info.get("alias") or baker_name)
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
+            log_debug("Failed to resolve baker alias", exception=str(e), baker=value)
 
-        # Close StakeScreen and return data to app for passphrase + estimation handling
-        self.dismiss(
-            {
-                "action": "delegate",
-                "baker_address": value,
-                "baker_name": baker_name,
-                "account": self.selected_account,
-            }
+        result = await self._confirm_delegate_flow(baker_address=value)
+        if not result:
+            return
+        key, confirm = result
+
+        fee_mutez = confirm.get("fee_mutez")
+        gas_limit = confirm.get("gas_limit")
+        storage_limit = confirm.get("storage_limit")
+
+        if self._change_baker_mode:
+            self._dismiss_stake_action(
+                "change_baker",
+                key=key,
+                fee_mutez=fee_mutez,
+                gas_limit=gas_limit,
+                storage_limit=storage_limit,
+                baker_address=value,
+                baker_name=baker_name,
+                current_baker=self.delegate_addr,
+            )
+            return
+
+        self._dismiss_stake_action(
+            "delegate",
+            key=key,
+            fee_mutez=fee_mutez,
+            gas_limit=gas_limit,
+            storage_limit=storage_limit,
+            baker_address=value,
+            baker_name=baker_name,
         )
+        return
             
     @on(Button.Pressed, "#stake_btn")
     async def stake_pressed(self) -> None:
         """Handle staking action."""
-        try:
-            from sassy_wallet.core.tezos import has_outgoing_tx
-            has_outgoing = has_outgoing_tx(self.rpc, self.selected_account.address)
-        except Exception:
-            has_outgoing = True
+        log_info(
+            "StakeScreen stake_pressed",
+            selected_address=getattr(self.selected_account, "address", ""),
+        )
+        if not self.selected_account:
+            self._show_error("⚠️ Select a wallet first.")
+            return
+        await self._refresh_selected_chain_state(force_refresh=True, preserve_input=True)
+        if not self.is_delegated:
+            self._show_error("⚠️ Wallet is not delegated. Delegate (or change baker) first.")
+            return
+
+        has_outgoing = self._has_outgoing_activity(self.selected_account.address)
         if self.balance_xtz <= 0 or not has_outgoing:
-            self._show_error(
-                "⚠️ You need a positive balance and at least one outgoing transfer "
-                "before you can delegate or stake."
-            )
+            self._show_error(_STAKE_OUTGOING_REQUIRED_MSG)
             return
 
-        input_field = self.query_one("#input_field", Input)
-        value = sanitize_input(input_field.value)
-
-        if not value:
-            self._show_error("⚠️ Please enter amount")
-            return
-
-        # Validate amount with proper error messages
-        is_valid, error_msg, amount = validate_amount(value, min_value=Decimal("0"), max_value=self.balance_xtz)
-
-        if not is_valid:
-            self._show_error(f"⚠️ {error_msg}")
+        amount = self._read_validated_amount(
+            empty_message="⚠️ Please enter amount",
+            max_value=self.balance_xtz,
+        )
+        if amount is None:
             return
 
         try:
+            if not await self._confirm_pending_ops_or_abort(
+                cancel_message="⏸️ Staking cancelled - waiting for pending operations",
+                detailed=False,
+            ):
+                return
 
-            # Check for pending transactions
-            from sassy_wallet.core.tezos import check_pending_operations
-            pending_info = check_pending_operations(self.rpc, self.selected_account.address)
-
-            if pending_info and pending_info.get('has_pending'):
-                pending_count = pending_info.get('pending_count', 0)
-                warning_msg = (
-                    f"⚠️ [b]Pending Transactions Detected![/b]\n\n"
-                    f"Found {pending_count} pending operation(s) for this wallet.\n"
-                    f"Proceeding may cause counter errors.\n\n"
-                    f"Wait 1-2 minutes for operations to confirm, then try again.\n\n"
-                    f"Proceed anyway? (Not recommended)"
-                )
-                proceed = await self.app.push_screen_wait(ConfirmScreen(warning_msg))
-                if not proceed:
-                    self._show_error("⏸️ Staking cancelled - waiting for pending operations")
-                    return
-
-            # Close StakeScreen and return basic data to app
-            # Passphrase and gas estimation will be handled in _handle_stake_action
-
-            self.dismiss(
-                {
-                    "action": "stake",
-                    "amount": amount,
-                    "account": self.selected_account,
-                }
+            result = await self._confirm_stake_flow(
+                amount=amount,
+                cancel_message="⏸️ Staking cancelled",
+                confirm_screen_factory=lambda key: ConfirmStakeScreen(
+                    rpc=self.rpc,
+                    key=key,
+                    address=self.selected_account.address,
+                    amount=amount,
+                    show_back_button=True,
+                ),
             )
+            log_info(
+                "StakeScreen confirm_stake_flow returned",
+                has_result=bool(result),
+                selected_address=getattr(self.selected_account, "address", ""),
+            )
+            if not result:
+                return
+            key, confirm = result
+            # Re-check pending operations right before handing control back to app.
+            # This closes a race where a just-injected op appears after the first check.
+            if not await self._confirm_pending_ops_or_abort(
+                cancel_message="⏸️ Staking paused - previous operation still pending",
+                detailed=False,
+            ):
+                return
+            log_info(
+                "StakeScreen dismissing stake action payload",
+                selected_address=getattr(self.selected_account, "address", ""),
+                amount=str(amount),
+                has_key=bool(key),
+            )
+            self._dismiss_stake_action(
+                "stake",
+                key=key,
+                amount=amount,
+                fee_mutez=confirm.get("fee_mutez"),
+                gas_limit=confirm.get("gas_limit"),
+                storage_limit=confirm.get("storage_limit"),
+            )
+            return
 
-        except (ValueError, decimal.InvalidOperation) as ve:
+        except (ValueError, decimal.InvalidOperation):
             self._show_error("⚠️ Invalid amount format")
-        except Exception as ex:
+        except _FLOW_TASK_EXCEPTIONS as ex:
+            log_error("Stake flow failed in modal", exception=ex)
             self._show_error(f"⚠️ Staking failed: {str(ex)}")
-            raise  # Re-raise to see full traceback
+            return
 
     @work(exclusive=True)
     @on(Button.Pressed, "#unstake_btn")
     async def unstake_pressed(self) -> None:
         """Handle unstaking action."""
-        input_field = self.query_one("#input_field", Input)
-        value = sanitize_input(input_field.value)
-
-        if not value:
-            self._show_error("⚠️ Please enter amount to unstake")
+        if not self.selected_account:
+            self._show_error("⚠️ Select a wallet first.")
+            return
+        await self._refresh_selected_chain_state(force_refresh=True, preserve_input=True)
+        if self.staked_mutez <= 0 and not self.staking_active:
+            self._show_error("⚠️ No staked balance detected. Refresh history and try again.")
             return
 
-        # Validate amount against staked balance
+        # Validate amount against staked balance when available; if we can't reliably
+        # determine it (TzKT lag / external baker change), let the chain validate.
         staked_xtz = mutez_to_xtz(self.staked_mutez)
-        is_valid, error_msg, amount = validate_amount(value, min_value=Decimal("0"), max_value=staked_xtz)
-        if not is_valid:
-            # Custom error message for unstaking
-            if "must not exceed" in error_msg:
-                self._show_error(f"⚠️ Cannot unstake more than staked ({format_xtz(staked_xtz)} XTZ)")
-            else:
-                self._show_error(f"⚠️ {error_msg}")
+        max_value = staked_xtz if self.staked_mutez > 0 else None
+        amount = self._read_validated_amount(
+            empty_message="⚠️ Please enter amount to unstake",
+            max_value=max_value,
+            over_limit_message=f"⚠️ Cannot unstake more than staked ({format_xtz(staked_xtz)} XTZ)",
+        )
+        if amount is None:
             return
 
         try:
+            if not await self._confirm_pending_ops_or_abort(
+                cancel_message="⏸️ Unstaking cancelled - waiting for pending operations",
+                detailed=False,
+            ):
+                return
 
-            # Check for pending transactions
-            from sassy_wallet.core.tezos import check_pending_operations
-            pending_info = check_pending_operations(self.rpc, self.selected_account.address)
-
-            if pending_info and pending_info.get('has_pending'):
-                pending_count = pending_info.get('pending_count', 0)
-                warning_msg = (
-                    f"⚠️ [b]Pending Transactions Detected![/b]\n\n"
-                    f"Found {pending_count} pending operation(s) for this wallet.\n"
-                    f"Proceeding may cause counter errors.\n\n"
-                    f"Wait 1-2 minutes for operations to confirm, then try again.\n\n"
-                    f"Proceed anyway? (Not recommended)"
-                )
-                proceed = await self.app.push_screen_wait(ConfirmScreen(warning_msg))
-                if not proceed:
-                    self._show_error("⏸️ Unstaking cancelled - waiting for pending operations")
-                    return
-
-            # Close StakeScreen and return basic data to app
-            # Passphrase and gas estimation will be handled in _handle_unstake_action
-
-            self.dismiss(
-                {
-                    "action": "unstake",
-                    "amount": amount,
-                    "account": self.selected_account,
-                }
+            result = await self._confirm_stake_flow(
+                amount=amount,
+                cancel_message="⏸️ Unstaking cancelled",
+                confirm_screen_factory=lambda key: ConfirmUnstakeScreen(
+                    rpc=self.rpc,
+                    key=key,
+                    address=self.selected_account.address,
+                    amount=amount,
+                    show_back_button=True,
+                ),
             )
+            if not result:
+                return
+            key, confirm = result
+            # Re-check pending operations right before handing control back to app.
+            if not await self._confirm_pending_ops_or_abort(
+                cancel_message="⏸️ Unstaking paused - previous operation still pending",
+                detailed=False,
+            ):
+                return
+
+            confirmed = await self._push_hidden_screen(
+                ConfirmScreen(
+                    "Unstaking is reversible, but your future self might judge you.\n\n"
+                    "Still want to proceed?",
+                    title="Second Thoughts",
+                    yes_label="Yes, unstake",
+                    no_label="Keep staking",
+                )
+            )
+            if not confirmed:
+                self._show_error("😒 Unstake canceled. Chad mode stays on.")
+                return
+
+            self._dismiss_stake_action(
+                "unstake",
+                key=key,
+                amount=amount,
+                fee_mutez=confirm.get("fee_mutez"),
+                gas_limit=confirm.get("gas_limit"),
+                storage_limit=confirm.get("storage_limit"),
+                second_confirmed=True,
+            )
+            return
 
         except (ValueError, decimal.InvalidOperation):
             self._show_error("⚠️ Invalid amount format")
+        except _FLOW_TASK_EXCEPTIONS as ex:
+            log_error("Unstake flow failed in modal", exception=ex)
+            self._show_error(f"⚠️ Unstaking failed: {str(ex)}")
+            return
+
+    def _read_validated_amount(
+        self,
+        *,
+        empty_message: str,
+        max_value: Optional[Decimal],
+        over_limit_message: str | None = None,
+    ) -> Optional[Decimal]:
+        value = sanitize_input(self.query_one("#input_field", Input).value)
+        if not value:
+            self._show_error(empty_message)
+            return None
+        is_valid, error_msg, amount = validate_amount(value, min_value=Decimal("0"), max_value=max_value)
+        if is_valid:
+            return amount
+        if over_limit_message and error_msg and "must not exceed" in error_msg:
+            self._show_error(over_limit_message)
+        else:
+            self._show_error(f"⚠️ {error_msg}")
+        return None
+
+    def _dismiss_stake_action(
+        self,
+        action: str,
+        *,
+        key: Any,
+        amount: Optional[Decimal] = None,
+        baker_address: Optional[str] = None,
+        baker_name: Optional[str] = None,
+        current_baker: Optional[str] = None,
+        fee_mutez: Optional[int] = None,
+        gas_limit: Optional[int] = None,
+        storage_limit: Optional[int] = None,
+        second_confirmed: bool = False,
+    ) -> None:
+        if not self.selected_account:
+            log_warning("StakeScreen attempted to dismiss action without selected account", action=action)
+            return
+        payload: dict[str, Any] = {
+            "action": action,
+            "account": self.selected_account,
+            "key": key,
+            "fee_mutez": fee_mutez,
+            "gas_limit": gas_limit,
+            "storage_limit": storage_limit,
+        }
+        if amount is not None:
+            payload["amount"] = amount
+        if baker_address is not None:
+            payload["baker_address"] = baker_address
+        if baker_name is not None:
+            payload["baker_name"] = baker_name
+        if current_baker is not None:
+            payload["current_baker"] = current_baker
+        if second_confirmed:
+            payload["second_confirmed"] = True
+        log_info(
+            "StakeScreen dismiss payload",
+            action=action,
+            selected_address=self.selected_account.address,
+            has_key=bool(key),
+            has_amount=("amount" in payload),
+        )
+        self.dismiss(payload)
+
+    async def _confirm_stake_flow(
+        self,
+        *,
+        amount: Decimal,
+        confirm_screen_factory: Callable[[Any], ModalScreen[dict]],
+        cancel_message: str,
+    ) -> Optional[tuple[Any, dict]]:
+        """Run passphrase+key check+confirm flow for stake/unstake actions."""
+        if not self.selected_account:
+            return None
+
+        while True:
+            key = await self._prompt_key_with_retry(
+                cancel_message=cancel_message,
+                prompt_factory=lambda error_note: StakePassphraseScreen(
+                    "Enter Your Encryption Password",
+                    password=True,
+                    placeholder="Your wallet encryption password",
+                    wallet_info=f"[b cyan]Wallet:[/b cyan] {self.selected_account.name}",
+                    ok_label="Next →",
+                    fun_note="Keep your keys safe. Never share this passphrase. 🔐🥖",
+                    show_back_button=True,
+                    error_note=error_note,
+                ),
+            )
+            if key is None:
+                log_info(
+                    "StakeScreen confirm_stake_flow aborted at passphrase",
+                    selected_address=getattr(self.selected_account, "address", ""),
+                )
+                return None
+
+            confirm = await self._push_hidden_screen(confirm_screen_factory(key))
+            if confirm and confirm.get(BACK_NAV_MARKER):
+                log_info(
+                    "StakeScreen confirm_stake_flow got __BACK__ from confirm screen",
+                    selected_address=getattr(self.selected_account, "address", ""),
+                )
+                continue
+            if not confirm or not confirm.get("ok"):
+                log_info(
+                    "StakeScreen confirm_stake_flow cancelled at confirm screen",
+                    selected_address=getattr(self.selected_account, "address", ""),
+                )
+                self._show_error(cancel_message)
+                return None
+            log_info(
+                "StakeScreen confirm_stake_flow confirmed",
+                selected_address=getattr(self.selected_account, "address", ""),
+            )
+            return key, confirm
+
+    async def _confirm_delegate_flow(self, *, baker_address: str) -> Optional[tuple[Any, dict]]:
+        """Run passphrase + confirm flow for delegate/change-baker actions."""
+        if not self.selected_account:
+            return None
+
+        while True:
+            key = await self._prompt_key_with_retry(
+                cancel_message="⏸️ Delegation cancelled",
+                prompt_factory=lambda error_note: WarningPassphraseScreen(
+                    "Enter Your Encryption Password",
+                    password=True,
+                    placeholder="Your wallet encryption password",
+                    wallet_info=f"[b cyan]Wallet:[/b cyan] {self.selected_account.name}",
+                    ok_label="Next →",
+                    fun_note=(
+                        "Switching bakers is still a delegation op (but spicier). 🔁🥐"
+                        if self._change_baker_mode
+                        else "Delegate like a boss! Your XTZ will thank you! 🎯"
+                    ),
+                    show_back_button=True,
+                    error_note=error_note,
+                ),
+            )
+            if key is None:
+                return None
+
+            if self._change_baker_mode:
+                confirm = await self._push_hidden_screen(
+                    ConfirmChangeBakerScreen(
+                        rpc=self.rpc,
+                        from_addr=self.selected_account.address,
+                        current_baker_address=self.delegate_addr or "",
+                        new_baker_address=baker_address,
+                        show_back_button=True,
+                    )
+                )
+            else:
+                confirm = await self._push_hidden_screen(
+                    ConfirmDelegateScreen(
+                        self.rpc,
+                        self.selected_account.address,
+                        baker_address,
+                        show_back_button=True,
+                    )
+                )
+
+            if confirm and confirm.get(BACK_NAV_MARKER):
+                continue
+            if not confirm or not confirm.get("ok"):
+                self._show_error("⏸️ Delegation cancelled")
+                return None
+            return key, confirm
+
+    async def _prompt_key_with_retry(
+        self,
+        *,
+        cancel_message: str,
+        prompt_factory: Callable[[str], ModalScreen[str]],
+    ) -> Optional[Any]:
+        if not self.selected_account:
+            return None
+        error_note = ""
+        while True:
+            pw = await self._push_hidden_screen(prompt_factory(error_note))
+            if pw == BACK_NAV_MARKER:
+                log_info(
+                    "StakeScreen passphrase returned __BACK__",
+                    selected_address=getattr(self.selected_account, "address", ""),
+                )
+                return None
+            if not pw:
+                log_info(
+                    "StakeScreen passphrase cancelled/empty",
+                    selected_address=getattr(self.selected_account, "address", ""),
+                )
+                self._show_error(cancel_message)
+                return None
+            try:
+                secret_key = decrypt_secret(self.selected_account.enc, pw)
+                key = key_from_encoded_secret(secret_key)
+            except InvalidTag:
+                error_note = "❌ Wrong passphrase. Try again."
+                continue
+            except (ValueError, TypeError) as decrypt_err:
+                raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
+            if not self._selected_key_matches(key):
+                return None
+            return key
+
+    async def _prompt_operation_secret(
+        self,
+        *,
+        ok_label: str,
+        fun_note: str,
+        cancel_status: str,
+    ) -> Optional[str]:
+        """Prompt passphrase with retry and decrypt current wallet secret."""
+        if not self.selected_account:
+            return None
+        error_note = ""
+        while True:
+            passphrase = await self.app.push_screen_wait(  # type: ignore[attr-defined]
+                SendPassphraseScreen(
+                    "Enter Your Encryption Password",
+                    password=True,
+                    placeholder="Your wallet encryption password",
+                    wallet_info=f"[b]{self.selected_account.name}[/b]",
+                    ok_label=ok_label,
+                    fun_note=fun_note,
+                    error_note=error_note,
+                )
+            )
+            if not passphrase:
+                self.query_one("#status_msg", Static).update(cancel_status)
+                return None
+            try:
+                return decrypt_secret(self.selected_account.enc, passphrase)
+            except InvalidTag:
+                error_note = "❌ Wrong passphrase. Try again."
+                continue
+            except (ValueError, TypeError) as decrypt_err:
+                raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
+
+    def _prepare_rpc_for_operation(self) -> bool:
+        _, can_send, _ = self.app._ensure_working_rpc()  # type: ignore[attr-defined]
+        self.rpc = self.app.rpc  # type: ignore[attr-defined]
+        if can_send:
+            return True
+        self.query_one("#status_msg", Static).update("[red]❌ No RPC available to inject operations[/red]")
+        return False
+
+    def _show_operation_failure(self, *, title: str, app_status: str, exception: BaseException) -> None:
+        error_msg = str(exception)
+        if len(error_msg) > 200:
+            error_msg = error_msg[:200] + "..."
+        try:
+            self.query_one("#status_msg", Static).update(
+                f"[red]❌ {title} failed[/red]\n"
+                f"[dim]{error_msg}[/dim]\n"
+                f"[yellow]Check logs/wallet.log for details[/yellow]"
+            )
+        except _UI_CALLBACK_EXCEPTIONS as e:
+            log_debug("Failed to update operation error message in modal", exception=str(e), title=title)
+        try:
+            self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
+            self.app._set_status(f"[red]❌ {app_status} failed - check logs[/red]")  # type: ignore[attr-defined]
+        except _UI_CALLBACK_EXCEPTIONS as e:
+            log_debug("Failed to update operation error status in app", exception=str(e), title=title)
+
+    def _selected_key_matches(self, key: Any, *, detailed: bool = False) -> bool:
+        if not self.selected_account:
+            return False
+        try:
+            key_pkh = key.public_key_hash()
+        except _FLOW_TASK_EXCEPTIONS as e:
+            log_error("Failed to read key public hash", exception=e)
+            self.query_one("#status_msg", Static).update("[red]❌ Invalid key data[/red]")
+            return False
+        if key_pkh == self.selected_account.address:
+            return True
+        msg = (
+            "[red]❌ KEY MISMATCH! Wallet address doesn't match decrypted key[/red]"
+            if detailed
+            else "[red]❌ KEY MISMATCH![/red]"
+        )
+        self.query_one("#status_msg", Static).update(msg)
+        return False
+
+    def _finalize_operation_success(
+        self,
+        *,
+        modal_success: str,
+        op_hash: str,
+        app_status: str,
+    ) -> None:
+        self.query_one("#status_msg", Static).update(
+            f"[#34d399]✅ {modal_success}[/#34d399]\n"
+            f"[dim]Operation: {op_hash}[/dim]"
+        )
+        self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
+        self.app._set_status(f"[#34d399]✅ {app_status}[/#34d399]")  # type: ignore[attr-defined]
+        self.app.call_later(self.app._refresh_account)  # type: ignore[attr-defined]
+        self.call_later(lambda: self.dismiss(None))
+
+    async def _await_tx_flow_budget(self, flow_start: float) -> None:
+        remaining = self.app._tx_flow_remaining_or_default(flow_start)  # type: ignore[attr-defined]
+        if remaining > 0:
+            await asyncio.sleep(remaining)
 
     async def _perform_delegation(self, baker_address: str, fee_mutez: Optional[int] = None, gas_limit: Optional[int] = None, storage_limit: Optional[int] = None) -> None:
         """Delegate to baker."""
         if not self.selected_account:
             return
 
-        # Get passphrase (with retry on error)
-        error_note = ""
-        while True:
-            passphrase = await self.app.push_screen_wait(  # type: ignore[attr-defined]
-                SendPassphraseScreen(
-                    "🔐 Enter Your Passphrase",
-                    password=True,
-                    placeholder="Your wallet passphrase",
-                    wallet_info=f"[b]{self.selected_account.name}[/b]",
-                    ok_label="✅ Delegate!",
-                    fun_note="Delegate like a boss! Your XTZ will thank you! 🎯",
-                    error_note=error_note,
-                )
-            )
-
-            if not passphrase:
-                status_widget = self.query_one("#status_msg", Static)
-                status_widget.update("[yellow]⏸️ Delegation cancelled[/yellow]")
-                return
-
-            try:
-                secret_key = decrypt_secret(self.selected_account.enc, passphrase)
-                break
-            except Exception as decrypt_err:
-                from cryptography.exceptions import InvalidTag
-
-                if isinstance(decrypt_err, InvalidTag):
-                    error_note = "❌ Wrong passphrase. Try again."
-                    continue
-                raise
+        secret_key = await self._prompt_operation_secret(
+            ok_label="✅ Delegate!",
+            fun_note="Delegate like a boss! Your XTZ will thank you! 🎯",
+            cancel_status="[yellow]⏸️ Delegation cancelled[/yellow]",
+        )
+        if not secret_key:
+            return
 
         try:
-            _, can_send, _ = self.app._ensure_working_rpc()  # type: ignore[attr-defined]
-            self.rpc = self.app.rpc  # type: ignore[attr-defined]
-            if not can_send:
-                status_widget = self.query_one("#status_msg", Static)
-                status_widget.update("[red]❌ No RPC available to inject operations[/red]")
+            if not self._prepare_rpc_for_operation():
                 return
             key = key_from_encoded_secret(secret_key)
+            if not self._selected_key_matches(key):
+                return
 
             status_widget = self.query_one("#status_msg", Static)
             status_widget.update("[yellow]⏳ Delegating... This may take a moment...[/yellow]")
             flow_start = time.time()
-            self.app._ui(self.app._start_breathing_effect, "⏳ Delegating...")  # type: ignore[attr-defined]
+            self.app._ui(
+                self.app._start_breathing_effect,
+                "⏳ Delegating...",
+                bright_class="status-warning",
+                dim_class="status-warning-dim",
+            )  # type: ignore[attr-defined]
 
             # Perform delegation with fee parameters (with RPC fallback on stale-branch errors)
             _, op_hash = self.app._with_rpc_fallback(  # type: ignore[attr-defined]
@@ -5667,17 +6461,20 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             )
             self.rpc = self.app.rpc  # type: ignore[attr-defined]
 
-            remaining = self.app._tx_flow_remaining(flow_start)  # type: ignore[attr-defined]
-            if remaining <= 0.1:
-                remaining = Config.TX_FLOW_TOTAL_SECONDS
-            if remaining > 0:
-                await asyncio.sleep(remaining)
+            await self._await_tx_flow_budget(flow_start)
 
             status_widget.update(f"[#34d399]✅ Delegation sent![/#34d399]\n[dim]Op: {op_hash} Waiting for confirmation...[/dim]")
             self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
 
             # Start spinner with baker-themed messages in main app
             baker_msg = get_baker_message()
+            self.app._ui(
+                self.app._set_status_styled,
+                baker_msg,
+                style="warning",
+                duration=0.0,
+                force=True,
+            )  # type: ignore[attr-defined]
             self.app._ui(self.app._start_spinner, baker_msg)  # type: ignore[attr-defined]
 
             # Set delegation pending state
@@ -5688,7 +6485,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             # Start polling for delegation confirmation
             self._start_delegation_polling()
 
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error("Delegation failed", exception=e)
             # Stop spinner on error
             self.app._ui(self.app._stop_spinner)  # type: ignore[attr-defined]
@@ -5700,60 +6497,24 @@ class StakeScreen(ModalScreen[Optional[dict]]):
 
     async def _perform_staking(self, amount: Decimal, fee_mutez: Optional[int] = None, gas_limit: Optional[int] = None, storage_limit: Optional[int] = None) -> None:
         """Stake XTZ."""
-        import traceback
-
-
         try:
             if not self.selected_account:
                 return
 
             source_address = self.selected_account.address
 
-            # Get passphrase (with retry on error)
-            error_note = ""
-            while True:
-                passphrase = await self.app.push_screen_wait(  # type: ignore[attr-defined]
-                    SendPassphraseScreen(
-                        "🔐 Enter Your Passphrase",
-                        password=True,
-                        placeholder="Your wallet passphrase",
-                        wallet_info=f"[b]{self.selected_account.name}[/b]",
-                        ok_label="💎 Stake!",
-                        fun_note="Time to become a CHAD! Lock in that XTZ! 💪🔥",
-                        error_note=error_note,
-                    )
-                )
+            secret_key = await self._prompt_operation_secret(
+                ok_label="💎 Stake!",
+                fun_note="Time to become a CHAD! Lock in that XTZ! 💪🔥",
+                cancel_status="[yellow]⏸️ Staking cancelled - passphrase not provided[/yellow]",
+            )
+            if not secret_key:
+                return
 
-                if not passphrase:
-                    status_widget = self.query_one("#status_msg", Static)
-                    status_widget.update("[yellow]⏸️ Staking cancelled - passphrase not provided[/yellow]")
-                    return
-
-                try:
-                    secret_key = decrypt_secret(self.selected_account.enc, passphrase)
-                    break
-                except Exception as decrypt_err:
-                    from cryptography.exceptions import InvalidTag
-
-                    if isinstance(decrypt_err, InvalidTag):
-                        error_note = "❌ Wrong passphrase. Try again."
-                        continue
-                    raise
-
-            # Decrypt key
-            _, can_send, _ = self.app._ensure_working_rpc()  # type: ignore[attr-defined]
-            self.rpc = self.app.rpc  # type: ignore[attr-defined]
-            if not can_send:
-                status_widget = self.query_one("#status_msg", Static)
-                status_widget.update("[red]❌ No RPC available to inject operations[/red]")
+            if not self._prepare_rpc_for_operation():
                 return
             key = key_from_encoded_secret(secret_key)
-
-            key_pkh = key.public_key_hash()
-
-            if source_address != key_pkh:
-                status_widget = self.query_one("#status_msg", Static)
-                status_widget.update(f"[red]❌ KEY MISMATCH! Wallet address doesn't match decrypted key[/red]")
+            if not self._selected_key_matches(key, detailed=True):
                 return
 
             status_widget = self.query_one("#status_msg", Static)
@@ -5783,105 +6544,47 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             )
             self.rpc = self.app.rpc  # type: ignore[attr-defined]
 
-            remaining = self.app._tx_flow_remaining(flow_start)  # type: ignore[attr-defined]
-            if remaining <= 0.1:
-                remaining = Config.TX_FLOW_TOTAL_SECONDS
-            if remaining > 0:
-                await asyncio.sleep(remaining)
+            await self._await_tx_flow_budget(flow_start)
 
-            # Show success message
-            status_widget.update(
-                f"[#34d399]✅ STAKE SUCCESSFUL! You're a true CHAD now! 🔥💪[/#34d399]\n"
-                f"[dim]Operation: {op_hash}[/dim]"
-            )
-            self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
-
-            # Also show in main app status bar
-            self.app._set_status(  # type: ignore[attr-defined]
-                f"[#34d399]✅ Staked {format_xtz(amount)} XTZ successfully![/#34d399]"
+            self._finalize_operation_success(
+                modal_success="STAKE SUCCESSFUL! You're a true CHAD now! 🔥💪",
+                op_hash=op_hash,
+                app_status=f"Staked {format_xtz(amount)} XTZ successfully!",
             )
 
-            # Trigger refresh to update display
-            self.app.call_later(self.app._refresh_account)  # type: ignore[attr-defined]
-
-            # Close modal after success
-            self.call_later(lambda: self.dismiss(None))
-
-        except Exception as e:
-
-            # Extract meaningful error message
-            error_msg = str(e)
-            if len(error_msg) > 200:
-                error_msg = error_msg[:200] + "..."
-
-            # Show error in modal (if status_widget exists)
-            try:
-                status_widget = self.query_one("#status_msg", Static)
-                status_widget.update(
-                    f"[red]❌ Staking failed[/red]\n"
-                    f"[dim]{error_msg}[/dim]\n"
-                    f"[yellow]Check logs/wallet.log for details[/yellow]"
-                )
-            except Exception as e:
-                log_debug("Failed to update staking error message in modal", exception=str(e))
-
-            # Also show error in main app
-            try:
-                self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
-                self.app._set_status(f"[red]❌ Staking failed - check logs[/red]")  # type: ignore[attr-defined]
-            except Exception as e:
-                log_debug("Failed to update staking error status in app", exception=str(e))
+        except _FLOW_TASK_EXCEPTIONS as e:
+            self._show_operation_failure(title="Staking", app_status="Staking", exception=e)
 
     async def _perform_unstaking(self, amount: Decimal, fee_mutez: Optional[int] = None, gas_limit: Optional[int] = None, storage_limit: Optional[int] = None) -> None:
         """Unstake XTZ."""
         if not self.selected_account:
             return
 
-        # Get passphrase (with retry on error)
-        error_note = ""
-        while True:
-            passphrase = await self.app.push_screen_wait(  # type: ignore[attr-defined]
-                SendPassphraseScreen(
-                    "🔐 Enter Your Passphrase",
-                    password=True,
-                    placeholder="Your wallet passphrase",
-                    wallet_info=f"[b]{self.selected_account.name}[/b]",
-                    ok_label="💸 Unstake!",
-                    fun_note="Time to unlock that XTZ! Freedom awaits! 🔓✨",
-                    error_note=error_note,
-                )
-            )
-
-            if not passphrase:
-                status_widget = self.query_one("#status_msg", Static)
-                status_widget.update("[yellow]⏸️ Unstaking cancelled[/yellow]")
-                return
-
-            try:
-                secret_key = decrypt_secret(self.selected_account.enc, passphrase)
-                break
-            except Exception as decrypt_err:
-                from cryptography.exceptions import InvalidTag
-
-                if isinstance(decrypt_err, InvalidTag):
-                    error_note = "❌ Wrong passphrase. Try again."
-                    continue
-                raise
+        secret_key = await self._prompt_operation_secret(
+            ok_label="💸 Unstake!",
+            fun_note="Time to unlock that XTZ! Freedom awaits! 🔓✨",
+            cancel_status="[yellow]⏸️ Unstaking cancelled[/yellow]",
+        )
+        if not secret_key:
+            return
 
         try:
-            _, can_send, _ = self.app._ensure_working_rpc()  # type: ignore[attr-defined]
-            self.rpc = self.app.rpc  # type: ignore[attr-defined]
-            if not can_send:
-                status_widget = self.query_one("#status_msg", Static)
-                status_widget.update("[red]❌ No RPC available to inject operations[/red]")
+            if not self._prepare_rpc_for_operation():
                 return
 
             key = key_from_encoded_secret(secret_key)
+            if not self._selected_key_matches(key):
+                return
 
             status_widget = self.query_one("#status_msg", Static)
             status_widget.update("[yellow]⏳ Unstaking... This may take a moment...[/yellow]")
             flow_start = time.time()
-            self.app._ui(self.app._start_breathing_effect, "⏳ Unstaking...")  # type: ignore[attr-defined]
+            self.app._ui(
+                self.app._start_breathing_effect,
+                "⏳ Unstaking...",
+                bright_class="status-unstake",
+                dim_class="status-unstake-dim",
+            )  # type: ignore[attr-defined]
 
             # Perform unstaking with fee parameters (with RPC fallback on stale-branch errors)
             _, op_hash = self.app._with_rpc_fallback(  # type: ignore[attr-defined]
@@ -5900,48 +6603,17 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             )
             self.rpc = self.app.rpc  # type: ignore[attr-defined]
 
-            remaining = self.app._tx_flow_remaining(flow_start)  # type: ignore[attr-defined]
-            if remaining <= 0.1:
-                remaining = Config.TX_FLOW_TOTAL_SECONDS
-            if remaining > 0:
-                await asyncio.sleep(remaining)
+            await self._await_tx_flow_budget(flow_start)
 
-            # Show success message in modal
-            status_widget.update(
-                f"[#34d399]✅ UNSTAKE SUCCESSFUL! XTZ unlocked! 💰[/#34d399]\n"
-                f"[dim]Operation: {op_hash}[/dim]"
-            )
-            self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
-
-            # Also show in main app status bar
-            self.app._set_status(  # type: ignore[attr-defined]
-                f"[#34d399]✅ Unstaked {format_xtz(amount)} XTZ successfully![/#34d399]"
+            self._finalize_operation_success(
+                modal_success="UNSTAKE SUCCESSFUL! XTZ unlocked! 💰",
+                op_hash=op_hash,
+                app_status=f"Unstaked {format_xtz(amount)} XTZ successfully!",
             )
 
-            # Trigger refresh to update display
-            self.app.call_later(self.app._refresh_account)  # type: ignore[attr-defined]
-
-            # Close modal after success
-            self.call_later(lambda: self.dismiss(None))
-
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error(f"Unstaking failed - Full error details", exception=e)
-            self.app._ui(self.app._stop_breathing_effect)  # type: ignore[attr-defined]
-            # Extract meaningful error message
-            error_msg = str(e)
-            # If the error is too long, truncate but keep the important part
-            if len(error_msg) > 200:
-                error_msg = error_msg[:200] + "..."
-
-            # Show error in modal status_widget (keep modal open)
-            status_widget = self.query_one("#status_msg", Static)
-            status_widget.update(
-                f"[red]❌ Unstaking failed[/red]\n"
-                f"[dim]{error_msg}[/dim]\n"
-                f"[yellow]Check logs/wallet.log for details[/yellow]"
-            )
-            # Also show error in main app
-            self.app._set_status(f"[red]❌ Unstaking failed - check logs[/red]")  # type: ignore[attr-defined]
+            self._show_operation_failure(title="Unstaking", app_status="Unstaking", exception=e)
 
     def _show_error(self, message: str) -> None:
         """Show error message."""
@@ -5995,7 +6667,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     # Trigger main app refresh
                     self.app.call_later(self.app._refresh_account)  # type: ignore[attr-defined]
 
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS + _FLOW_TASK_EXCEPTIONS as e:
                 log_error("Failed to check delegation status", exception=e)
 
         # Poll every 5 seconds for up to 2 minutes
@@ -6097,8 +6769,6 @@ class TxDetailsScreen(ModalScreen[None]):
             # Shorten addresses for display
             from_short = from_addr[:10] + "..." + from_addr[-8:] if len(from_addr) > 20 else from_addr
             to_short = to_addr[:10] + "..." + to_addr[-8:] if len(to_addr) > 20 else to_addr
-            hash_short = h[:10] + "..." + h[-8:] if len(h) > 20 else h
-
             lines = [
                 f"Time:    {ts}",
                 f"Amount:  {amt_label}",
@@ -6343,23 +7013,13 @@ class ConfirmSendScreen(ModalScreen[dict]):
     # Estimation pulse (ConfirmSendScreen)
     # -------------------------
     def _start_est_pulse(self) -> None:
-        self._estimating = True
-        self._est_i = 0
-        if self._est_timer is None:
-            self._est_timer = self.set_interval(Config.ESTIMATION_PULSE_INTERVAL, self._tick_est_pulse)
+        _start_estimation_pulse(self)
 
     def _stop_est_pulse(self) -> None:
-        self._estimating = False
-        if self._est_timer is not None:
-            self._est_timer.stop()
-            self._est_timer = None
+        _stop_estimation_pulse(self)
 
     def _tick_est_pulse(self) -> None:
-        if not self._estimating:
-            return
-        self._est_i += 1
-        self._render_summary(estimating=True)
-        self._update_fee_list(estimating=True)
+        _tick_estimation_pulse(self)
 
     def _render_summary(self, estimating: bool = False, err: str = "") -> None:
         net = network_from_rpc(self.rpc)
@@ -6392,16 +7052,6 @@ class ConfirmSendScreen(ModalScreen[dict]):
                 "You can still SEND (autofill) or use Advanced overrides.",
             ]
         else:
-            est = self._estimate or {}
-            reveal_needed = bool(est.get("reveal_needed"))
-            fee_opts = est.get("fee_options") or {}
-            chosen = fee_opts.get(self._fee_choice) or {}
-
-            chosen_total = chosen.get("total_fee_xtz")
-            tx = est.get("tx") or {}
-            gas = int(tx.get("gas_limit") or 0)
-            storage = int(tx.get("storage_limit") or 0)
-
             # Simple summary (suggested limits moved to separate widget)
             lines = [
                 "[b]Confirm transaction[/b]",
@@ -6418,14 +7068,7 @@ class ConfirmSendScreen(ModalScreen[dict]):
 
 
     def _init_fee_list(self) -> None:
-        """Create the 3 fixed fee rows once, keeping Label refs for fast updates."""
-        lv = self.query_one("#fee_list", ListView)
-        lv.clear()
-        self._fee_labels = []
-        for _ in range(3):
-            lbl = Label("")
-            self._fee_labels.append(lbl)
-            lv.append(ListItem(lbl))
+        _init_fee_rows(self)
 
     def _update_fee_list(self, estimating: bool = False, err: str = "") -> None:
         """Update fee rows text + checkmark without rebuilding ListView."""
@@ -6433,52 +7076,24 @@ class ConfirmSendScreen(ModalScreen[dict]):
         if not self._fee_labels:
             self._init_fee_list()
 
-        try:
-            fee_title = self.query_one("#fee_title", Static)
-            if estimating:
-                shimmer = shimmer_text("Estimating...", self._est_i, span=2, pingpong=True)
-                fee_title.update(f"[b]Fee[/b] — {shimmer} [dim](↑/↓ to choose)[/dim]")
-            else:
-                fee_title.update("[b]Fee[/b] (↑/↓ to choose)")
-        except Exception as e:
-            log_debug("Failed to update fee title in send confirm", exception=str(e))
+        _update_fee_title(self, estimating=estimating, debug_context="Failed to update fee title in send confirm")
 
-        if estimating:
-            texts = [
-                "  Economy — estimating…",
-                "  Normal — estimating…",
-                "  Priority — estimating…",
-            ]
-        elif err or not self._estimate:
-            texts = [
-                "  Economy — unavailable",
-                "  Normal — unavailable",
-                "  Priority — unavailable",
-            ]
-        else:
-            fee_opts = (self._estimate.get("fee_options") or {})
-            order = [("economy", "Economy"), ("normal", "Normal"), ("priority", "Priority")]
-            texts = []
-            for key, title in order:
-                d = fee_opts.get(key) or {}
-                total_xtz = d.get("total_fee_xtz")
-                mark = "✓ " if key == self._fee_choice else "  "
-                texts.append(f"{mark}{title} — total fee: {format_xtz(total_xtz) if total_xtz else '0'} XTZ")
+        texts = _build_fee_rows_text(
+            self._fee_choice,
+            estimate=self._estimate,
+            estimating=estimating,
+            err=err,
+            value_prefix="total fee: ",
+            selected_mark="✓ ",
+            unselected_mark="  ",
+        )
 
         for lbl, txt in zip(self._fee_labels, texts):
             lbl.update(txt)
 
     @on(ListView.Selected, "#fee_list")
     def fee_selected(self, event: ListView.Selected) -> None:
-        # Selection should commit only on Enter / click.
-        idx = event.list_view.index
-        if idx is None:
-            return
-        self._fee_choice = {0: "economy", 1: "normal", 2: "priority"}.get(idx, "normal")
-        # Update checkmarks + summary (do NOT move highlight).
-        self._update_fee_list(estimating=False)
-        if self._estimate:
-            self._render_summary(estimating=False)
+        _handle_fee_selection(self, event, render_requires_estimate=True)
 
     @work(exclusive=True, thread=True)
     def _estimate_worker(self) -> None:
@@ -6508,7 +7123,7 @@ class ConfirmSendScreen(ModalScreen[dict]):
             # Use the App bridge instead.
             self.app.call_from_thread(_ui_apply)
 
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error("Failed to estimate transaction fees", exception=e)
             # Report error safely on UI thread
             self.app.call_from_thread(self._stop_est_pulse)
@@ -6516,11 +7131,7 @@ class ConfirmSendScreen(ModalScreen[dict]):
             self.app.call_from_thread(self._render_summary, False, str(e))
 
     def _enable_send_button(self) -> None:
-        try:
-            self.query_one("#send", Button).disabled = False
-            self.query_one("#send", Button).focus()
-        except Exception as e:
-            log_debug("Failed to enable send button in send confirm", exception=str(e))
+        _enable_action_button(self, "#send", "Failed to enable send button in send confirm")
 
     def _apply_estimate_fallback(self) -> None:
         if not self._estimating or self._estimate is not None:
@@ -6584,62 +7195,13 @@ class ConfirmSendScreen(ModalScreen[dict]):
         if self._advanced:
             self.query_one("#fee_xtz", Input).focus()
         else:
-            # Return to fee list for arrow keys
-            try:
-                self.query_one("#fee_list", ListView).focus()
-            except Exception as e:
-                log_error("Failed to focus fee list", exception=e)
-                # Focus appropriate button based on context
-                try:
-                    self.query_one("#send", Button).focus()
-                except Exception as e2:
-                    try:
-                        self.query_one("#delegate", Button).focus()
-                    except Exception as e3:
-                        log_debug(
-                            "Failed to focus fallback buttons in send confirm",
-                            exception=str(e3),
-                            prior_exception=str(e2),
-                        )
-
-    def _parse_overrides(self) -> tuple[Optional[int], Optional[int], Optional[int]]:
-        fee_xtz_s = sanitize_input(self.query_one("#fee_xtz", Input).value or "")
-        gas_s = sanitize_input(self.query_one("#gas_limit", Input).value or "")
-        storage_s = sanitize_input(self.query_one("#storage_limit", Input).value or "")
-
-        fee_mutez = None
-        gas = None
-        storage = None
-
-        if fee_xtz_s:
-            is_valid, error_msg, fee_xtz = validate_fee(fee_xtz_s)
-            if not is_valid:
-                raise ValueError(f"Invalid fee: {error_msg}")
-            fee_mutez = _xtz_to_mutez(fee_xtz)
-
-        if gas_s:
-            is_valid, error_msg, gas = validate_gas_limit(gas_s)
-            if not is_valid:
-                raise ValueError(f"Invalid gas limit: {error_msg}")
-
-        if storage_s:
-            is_valid, error_msg, storage = validate_storage_limit(storage_s)
-            if not is_valid:
-                raise ValueError(f"Invalid storage limit: {error_msg}")
-
-        return fee_mutez, gas, storage
-
-    def _fee_choice_to_tx_fee_mutez(self) -> Optional[int]:
-        if not self._estimate:
-            return None
-        fee_opts = (self._estimate.get("fee_options") or {})
-        chosen = fee_opts.get(self._fee_choice) or {}
-        tx_fee = chosen.get("tx_fee_mutez")
-        try:
-            return int(tx_fee) if tx_fee is not None else None
-        except Exception as e:
-            log_error("Failed to parse tx fee from choice", exception=e, tx_fee=tx_fee)
-            return None
+            _focus_with_fallback(
+                self,
+                primary=("#fee_list", ListView),
+                fallbacks=(("#send", Button), ("#delegate", Button)),
+                primary_error="Failed to focus fee list",
+                fallback_error="Failed to focus fallback buttons in send confirm",
+            )
 
     @on(Button.Pressed, "#toggle")
     def toggle_pressed(self) -> None:
@@ -6647,64 +7209,38 @@ class ConfirmSendScreen(ModalScreen[dict]):
 
     @on(Button.Pressed, "#cancel")
     def cancel_pressed(self) -> None:
-        self.dismiss({"ok": False, "fee_mutez": None, "gas_limit": None, "storage_limit": None})
+        self.dismiss(_tx_modal_result(ok=False))
 
     @on(Button.Pressed, "#back")
     def back_pressed(self) -> None:
-        self.dismiss({"__BACK__": True, "ok": False, "fee_mutez": None, "gas_limit": None, "storage_limit": None})
+        self.dismiss(_tx_modal_result(ok=False, back=True))
 
     @on(Button.Pressed, "#send")
     def send_pressed(self) -> None:
         # Modo Advanced => overrides manuales
         if self._advanced:
             try:
-                fee_mutez, gas, storage = self._parse_overrides()
-            except Exception as e:
+                fee_mutez, gas, storage = _parse_tx_overrides(self)
+            except (ValueError, TypeError) as e:
                 log_error("Failed to parse override values", exception=e)
                 self._render_summary(err=str(e))
                 return
-            self.dismiss({"ok": True, "fee_mutez": fee_mutez, "gas_limit": gas, "storage_limit": storage})
+            self.dismiss(_tx_modal_result(ok=True, fee_mutez=fee_mutez, gas_limit=gas, storage_limit=storage))
             return
 
         # Modo normal => fee por selector, gas/storage = None (autofill)
-        fee_mutez = self._fee_choice_to_tx_fee_mutez()
-        self.dismiss({"ok": True, "fee_mutez": fee_mutez, "gas_limit": None, "storage_limit": None})
+        fee_mutez = _tx_fee_mutez_from_choice(self._estimate, self._fee_choice)
+        self.dismiss(_tx_modal_result(ok=True, fee_mutez=fee_mutez))
 
     def on_key(self, event) -> None:
         key = getattr(event, "key", None)
-
-        if key == "escape":
-            self.cancel_pressed()
-            event.stop()
-            return
-
-        # Let Input/ListView handle keys naturally, but allow escape to blur first
-        if isinstance(self.app.focused, (Input, ListView)):
-            if key == "escape" and isinstance(self.app.focused, Input):
-                try:
-                    self.query_one("#cancel", Button).focus()
-                except Exception as e:
-                    log_debug("Failed to focus cancel button in send confirm", exception=str(e))
-                event.stop()
-            return
-
-        if key == "backspace" and self.show_back_button:
-            self.back_pressed()
-            event.stop()
-            return
-
-        # enter: si focus toggle => toggle; si focus cancel => cancel; si focus fee list => seleccionar; else send
-        if key == "enter":
-            try:
-                if self.query_one("#toggle", Button).has_focus:
-                    self._toggle_advanced()
-                    return
-                if self.query_one("#cancel", Button).has_focus:
-                    self.cancel_pressed()
-                    return
-            except Exception as e:
-                log_error("Failed to check button focus", exception=e)
-            self.send_pressed()
+        _handle_tx_confirm_key(
+            self,
+            event,
+            key,
+            context="send confirm",
+            action_handler=self.send_pressed,
+        )
 
 
 class ConfirmDelegateScreen(ModalScreen[dict]):
@@ -6730,11 +7266,17 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
         width: auto;
         min-width: 65;
         max-width: 80;
+        min-height: 22;
         height: auto;
         max-height: 30;
         background: $surface;
         border: heavy #eab308;
         padding: 1 2;
+    }
+
+    ConfirmDelegateScreen #title {
+        margin-bottom: 1;
+        color: $accent;
     }
 
     ConfirmDelegateScreen #summary {
@@ -6824,6 +7366,7 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
+            yield Static("[b]Confirm Delegation[/b]", id="title", markup=True)
             yield Static("", id="summary", markup=True)
 
             yield Static("[b]Fee[/b] (↑/↓ to choose)", id="fee_title", markup=True)
@@ -6852,6 +7395,7 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
                 if self.show_back_button:
                     yield Button("← Back", id="back", variant="default")
                 yield Button("Delegate", id="delegate", variant="warning")
+                yield Button("Advanced", id="toggle")
                 yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
@@ -6885,31 +7429,19 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
     # Estimation pulse (ConfirmDelegateScreen)
     # -------------------------
     def _start_est_pulse(self) -> None:
-        self._estimating = True
-        self._est_i = 0
-        if self._est_timer is None:
-            self._est_timer = self.set_interval(Config.ESTIMATION_PULSE_INTERVAL, self._tick_est_pulse)
+        _start_estimation_pulse(self)
 
     def _stop_est_pulse(self) -> None:
-        self._estimating = False
-        if self._est_timer is not None:
-            self._est_timer.stop()
-            self._est_timer = None
+        _stop_estimation_pulse(self)
 
     def _tick_est_pulse(self) -> None:
-        if not self._estimating:
-            return
-        self._est_i += 1
-        self._render_summary(estimating=True)
-        self._update_fee_list(estimating=True)
+        _tick_estimation_pulse(self)
 
     def _render_summary(self, estimating: bool = False, err: str = "") -> None:
         net = network_from_rpc(self.rpc)
 
         if estimating:
             lines = [
-                "[b]Confirm delegation[/b]",
-                "",
                 f"[b yellow]Network:[/b yellow]   {net}",
                 "",
                 f"[b yellow]From:[/b yellow]      {self.from_addr}",
@@ -6918,8 +7450,6 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
             ]
         elif err:
             lines = [
-                "[b]Confirm delegation[/b]",
-                "",
                 f"[b yellow]Network:[/b yellow]   {net}",
                 "",
                 f"[b yellow]From:[/b yellow]      {self.from_addr}",
@@ -6931,20 +7461,8 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
                 "You can still DELEGATE (autofill) or use Advanced overrides.",
             ]
         else:
-            est = self._estimate or {}
-            reveal_needed = bool(est.get("reveal_needed"))
-            fee_opts = est.get("fee_options") or {}
-            chosen = fee_opts.get(self._fee_choice) or {}
-
-            chosen_total = chosen.get("total_fee_xtz")
-            tx = est.get("tx") or {}
-            gas = int(tx.get("gas_limit") or 0)
-            storage = int(tx.get("storage_limit") or 0)
-
             # Simple summary (suggested limits moved to separate widget)
             lines = [
-                "[b]Confirm delegation[/b]",
-                "",
                 f"[b yellow]Network:[/b yellow]   {net}",
                 "",
                 f"[b yellow]From:[/b yellow]      {self.from_addr}",
@@ -6954,16 +7472,8 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
 
         self.query_one("#summary", Static).update("\n".join(lines))
 
-
     def _init_fee_list(self) -> None:
-        """Create the 3 fixed fee rows once, keeping Label refs for fast updates."""
-        lv = self.query_one("#fee_list", ListView)
-        lv.clear()
-        self._fee_labels = []
-        for _ in range(3):
-            lbl = Label("")
-            self._fee_labels.append(lbl)
-            lv.append(ListItem(lbl))
+        _init_fee_rows(self)
 
     def _update_fee_list(self, estimating: bool = False, err: str = "") -> None:
         """Update fee rows text + checkmark without rebuilding ListView."""
@@ -6971,52 +7481,24 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
         if not self._fee_labels:
             self._init_fee_list()
 
-        try:
-            fee_title = self.query_one("#fee_title", Static)
-            if estimating:
-                shimmer = shimmer_text("Estimating...", self._est_i, span=2, pingpong=True)
-                fee_title.update(f"[b]Fee[/b] — {shimmer} [dim](↑/↓ to choose)[/dim]")
-            else:
-                fee_title.update("[b]Fee[/b] (↑/↓ to choose)")
-        except Exception as e:
-            log_debug("Failed to update fee title in delegate confirm", exception=str(e))
+        _update_fee_title(self, estimating=estimating, debug_context="Failed to update fee title in delegate confirm")
 
-        if estimating:
-            texts = [
-                "  Economy — estimating…",
-                "  Normal — estimating…",
-                "  Priority — estimating…",
-            ]
-        elif err or not self._estimate:
-            texts = [
-                "  Economy — unavailable",
-                "  Normal — unavailable",
-                "  Priority — unavailable",
-            ]
-        else:
-            fee_opts = (self._estimate.get("fee_options") or {})
-            order = [("economy", "Economy"), ("normal", "Normal"), ("priority", "Priority")]
-            texts = []
-            for key, title in order:
-                d = fee_opts.get(key) or {}
-                total_xtz = d.get("total_fee_xtz")
-                mark = "✓ " if key == self._fee_choice else "  "
-                texts.append(f"{mark}{title} — total fee: {format_xtz(total_xtz) if total_xtz else '0'} XTZ")
+        texts = _build_fee_rows_text(
+            self._fee_choice,
+            estimate=self._estimate,
+            estimating=estimating,
+            err=err,
+            value_prefix="total fee: ",
+            selected_mark="✓ ",
+            unselected_mark="  ",
+        )
 
         for lbl, txt in zip(self._fee_labels, texts):
             lbl.update(txt)
 
     @on(ListView.Selected, "#fee_list")
     def fee_selected(self, event: ListView.Selected) -> None:
-        # Selection should commit only on Enter / click.
-        idx = event.list_view.index
-        if idx is None:
-            return
-        self._fee_choice = {0: "economy", 1: "normal", 2: "priority"}.get(idx, "normal")
-        # Update checkmarks + summary (do NOT move highlight).
-        self._update_fee_list(estimating=False)
-        if self._estimate:
-            self._render_summary(estimating=False)
+        _handle_fee_selection(self, event, render_requires_estimate=True)
 
     @work(exclusive=True, thread=True)
     def _estimate_worker(self) -> None:
@@ -7036,9 +7518,7 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
                 self._fee_choice = "normal"
                 self._update_fee_list(estimating=False)
                 self._render_summary(estimating=False)
-                delegate_btn = self.query_one("#delegate", Button)
-                delegate_btn.disabled = False
-                delegate_btn.focus()
+                self._enable_delegate_button()
 
                 self.query_one("#fee_xtz", Input).value = str(mutez_to_xtz(fee_mutez))
                 self.query_one("#gas_limit", Input).value = str(gas) if gas else ""
@@ -7048,7 +7528,7 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
             # Use the App bridge instead.
             self.app.call_from_thread(_ui_apply)
 
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error("Failed to estimate delegation fees", exception=e)
             # Report error safely on UI thread
             self.app.call_from_thread(self._stop_est_pulse)
@@ -7056,14 +7536,10 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
             self.app.call_from_thread(self._render_summary, False, str(e))
 
     def _apply_estimate_fallback(self) -> None:
-        if not self._estimating or self._estimate is not None:
-            return
-        self._stop_est_pulse()
-        self._render_summary(err="")
-        self._update_fee_list(estimating=False)
-        delegate_btn = self.query_one("#delegate", Button)
-        delegate_btn.disabled = False
-        delegate_btn.focus()
+        _apply_basic_estimate_fallback(self, enable_action=self._enable_delegate_button)
+
+    def _enable_delegate_button(self) -> None:
+        _enable_action_button(self, "#delegate", "Failed to enable delegate button in delegate confirm")
 
     def _toggle_advanced(self) -> None:
         self._advanced = not self._advanced
@@ -7107,62 +7583,13 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
         if self._advanced:
             self.query_one("#fee_xtz", Input).focus()
         else:
-            # Return to fee list for arrow keys
-            try:
-                self.query_one("#fee_list", ListView).focus()
-            except Exception as e:
-                log_error("Failed to focus fee list", exception=e)
-                # Focus appropriate button based on context
-                try:
-                    self.query_one("#send", Button).focus()
-                except Exception as e2:
-                    try:
-                        self.query_one("#delegate", Button).focus()
-                    except Exception as e3:
-                        log_debug(
-                            "Failed to focus fallback buttons in delegate confirm",
-                            exception=str(e3),
-                            prior_exception=str(e2),
-                        )
-
-    def _parse_overrides(self) -> tuple[Optional[int], Optional[int], Optional[int]]:
-        fee_xtz_s = sanitize_input(self.query_one("#fee_xtz", Input).value or "")
-        gas_s = sanitize_input(self.query_one("#gas_limit", Input).value or "")
-        storage_s = sanitize_input(self.query_one("#storage_limit", Input).value or "")
-
-        fee_mutez = None
-        gas = None
-        storage = None
-
-        if fee_xtz_s:
-            is_valid, error_msg, fee_xtz = validate_fee(fee_xtz_s)
-            if not is_valid:
-                raise ValueError(f"Invalid fee: {error_msg}")
-            fee_mutez = _xtz_to_mutez(fee_xtz)
-
-        if gas_s:
-            is_valid, error_msg, gas = validate_gas_limit(gas_s)
-            if not is_valid:
-                raise ValueError(f"Invalid gas limit: {error_msg}")
-
-        if storage_s:
-            is_valid, error_msg, storage = validate_storage_limit(storage_s)
-            if not is_valid:
-                raise ValueError(f"Invalid storage limit: {error_msg}")
-
-        return fee_mutez, gas, storage
-
-    def _fee_choice_to_tx_fee_mutez(self) -> Optional[int]:
-        if not self._estimate:
-            return None
-        fee_opts = (self._estimate.get("fee_options") or {})
-        chosen = fee_opts.get(self._fee_choice) or {}
-        tx_fee = chosen.get("tx_fee_mutez")
-        try:
-            return int(tx_fee) if tx_fee is not None else None
-        except Exception as e:
-            log_error("Failed to parse tx fee from choice", exception=e, tx_fee=tx_fee)
-            return None
+            _focus_with_fallback(
+                self,
+                primary=("#fee_list", ListView),
+                fallbacks=(("#send", Button), ("#delegate", Button)),
+                primary_error="Failed to focus fee list",
+                fallback_error="Failed to focus fallback buttons in delegate confirm",
+            )
 
     @on(Button.Pressed, "#toggle")
     def toggle_pressed(self) -> None:
@@ -7170,65 +7597,219 @@ class ConfirmDelegateScreen(ModalScreen[dict]):
 
     @on(Button.Pressed, "#cancel")
     def cancel_pressed(self) -> None:
-        self.dismiss({"ok": False, "fee_mutez": None, "gas_limit": None, "storage_limit": None})
+        self.dismiss(_tx_modal_result(ok=False))
 
     @on(Button.Pressed, "#back")
     def back_pressed(self) -> None:
-        self.dismiss({"__BACK__": True, "ok": False, "fee_mutez": None, "gas_limit": None, "storage_limit": None})
+        self.dismiss(_tx_modal_result(ok=False, back=True))
 
     @on(Button.Pressed, "#delegate")
     def delegate_pressed(self) -> None:
         # Advanced mode => manual overrides
         if self._advanced:
             try:
-                fee_mutez, gas, storage = self._parse_overrides()
-            except Exception as e:
+                fee_mutez, gas, storage = _parse_tx_overrides(self)
+            except (ValueError, TypeError) as e:
                 log_error("Failed to parse override values", exception=e)
                 self._render_summary(err=str(e))
                 return
-            self.dismiss({"ok": True, "fee_mutez": fee_mutez, "gas_limit": gas, "storage_limit": storage})
+            self.dismiss(_tx_modal_result(ok=True, fee_mutez=fee_mutez, gas_limit=gas, storage_limit=storage))
             return
 
-        # Normal mode => fee by selector, gas/storage = None (autofill)
-        fee_mutez = self._fee_choice_to_tx_fee_mutez()
-        self.dismiss({"ok": True, "fee_mutez": fee_mutez, "gas_limit": None, "storage_limit": None})
+        # Normal mode => fee by selector, gas/storage via autofill
+        fee_mutez = _tx_fee_mutez_from_choice(self._estimate, self._fee_choice)
+        self.dismiss(_tx_modal_result(ok=True, fee_mutez=fee_mutez))
 
     def on_key(self, event) -> None:
         key = getattr(event, "key", None)
+        _handle_tx_confirm_key(
+            self,
+            event,
+            key,
+            context="delegate confirm",
+            action_handler=self.delegate_pressed,
+        )
 
-        if key == "escape":
-            self.cancel_pressed()
-            event.stop()
-            return
 
-        # Let Input/ListView handle keys naturally, but allow escape to blur first
-        if isinstance(self.app.focused, (Input, ListView)):
-            if key == "escape" and isinstance(self.app.focused, Input):
-                try:
-                    self.query_one("#cancel", Button).focus()
-                except Exception as e:
-                    log_debug("Failed to focus cancel button in delegate confirm", exception=str(e))
-                event.stop()
-            return
+class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
+    """Confirmation modal for changing baker (delegation under the hood)."""
 
-        if key == "backspace" and self.show_back_button:
-            self.back_pressed()
-            event.stop()
-            return
+    CSS = """
+    ConfirmChangeBakerScreen {
+        align: center middle;
+    }
 
-        # enter: if focus toggle => toggle; if focus cancel => cancel; else delegate
-        if key == "enter":
-            try:
-                if self.query_one("#toggle", Button).has_focus:
-                    self._toggle_advanced()
-                    return
-                if self.query_one("#cancel", Button).has_focus:
-                    self.cancel_pressed()
-                    return
-            except Exception as e:
-                log_error("Failed to check button focus", exception=e)
-            self.delegate_pressed()
+    ConfirmChangeBakerScreen > Vertical {
+        width: auto;
+        min-width: 65;
+        max-width: 80;
+        min-height: 22;
+        height: auto;
+        max-height: 30;
+        background: $surface;
+        border: heavy #eab308;
+        padding: 1 2;
+    }
 
+    ConfirmChangeBakerScreen #title {
+        margin-bottom: 1;
+        color: $accent;
+    }
+
+    ConfirmChangeBakerScreen #summary {
+        margin-bottom: 0;
+    }
+
+    ConfirmChangeBakerScreen #fee_title {
+        margin-bottom: 0;
+        color: $accent;
+    }
+
+    ConfirmChangeBakerScreen #fee_list {
+        height: 4;
+        margin-bottom: 1;
+    }
+
+    ConfirmChangeBakerScreen #fee_list > ListItem {
+        padding: 0 0 0 2;
+    }
+
+    ConfirmChangeBakerScreen #suggested_limits {
+        margin-top: 1;
+        margin-bottom: 1;
+        color: $text-muted;
+        min-height: 2;
+    }
+
+    ConfirmChangeBakerScreen #advanced {
+        margin-top: 0;
+        margin-bottom: 1;
+    }
+
+    ConfirmChangeBakerScreen #advanced_joke {
+        margin-top: 1;
+        margin-bottom: 0;
+        color: #f97316;
+        text-style: bold italic;
+        min-height: 2;
+    }
+
+    ConfirmChangeBakerScreen Input {
+        border: solid #4b5563;
+        background: transparent;
+        padding: 0 1;
+    }
+
+    ConfirmChangeBakerScreen Input:focus {
+        border: solid #10b981;
+    }
+
+    ConfirmChangeBakerScreen Horizontal {
+        align: center middle;
+        margin-top: 1;
+    }
+
+    ConfirmChangeBakerScreen Horizontal > Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(
+        self,
+        rpc: str,
+        from_addr: str,
+        current_baker_address: str,
+        new_baker_address: str,
+        show_back_button: bool = False,
+    ):
+        super().__init__(rpc=rpc, from_addr=from_addr, baker_address=new_baker_address, show_back_button=show_back_button)
+        self.current_baker_address = current_baker_address
+        self.new_baker_address = new_baker_address
+        self._current_baker_label = self._resolve_current_baker_label()
+        self._new_baker_label = self._baker_label
+
+    def _resolve_current_baker_label(self) -> str:
+        if not self.current_baker_address:
+            return "—"
+        info = get_baker_info(self.rpc, self.current_baker_address, force_refresh=True)
+        alias = info.get("alias") if info else None
+        if alias:
+            return f"{alias} [dim]({self.current_baker_address})[/dim]"
+        return self.current_baker_address
+
+    def compose(self) -> ComposeResult:
+        # Same structure as ConfirmDelegateScreen, but with different primary button label.
+        with Vertical():
+            yield Static("[b]Confirm Baker Change[/b]", id="title", markup=True)
+            yield Static("", id="summary", markup=True)
+
+            yield Static("[b]Fee[/b] (↑/↓ to choose)", id="fee_title", markup=True)
+            yield ListView(id="fee_list")
+
+            # Suggested limits (shown only when advanced mode is active)
+            yield Static("", id="suggested_limits", markup=True)
+
+            # Advanced container (hidden by default)
+            with Vertical(id="advanced"):
+                yield Static("[b]Advanced (TX overrides)[/b]\nLeave blank to use suggested/autofill.", markup=True)
+                with Horizontal():
+                    yield Static("Fee (XTZ):", id="lbl_fee")
+                    yield Input(placeholder="e.g. 0.005", id="fee_xtz")
+                with Horizontal():
+                    yield Static("Gas limit:", id="lbl_gas")
+                    yield Input(placeholder="e.g. 20000", id="gas_limit")
+                with Horizontal():
+                    yield Static("Storage limit:", id="lbl_storage")
+                    yield Input(placeholder="e.g. 0", id="storage_limit")
+
+            # Advanced mode joke (near buttons)
+            yield Static("", id="advanced_joke", markup=True)
+
+            with Horizontal():
+                if self.show_back_button:
+                    yield Button("← Back", id="back", variant="default")
+                yield Button("Change Baker", id="delegate", variant="warning")
+                yield Button("Advanced", id="toggle")
+                yield Button("Cancel", id="cancel")
+
+    def _render_summary(self, estimating: bool = False, err: str = "") -> None:
+        net = network_from_rpc(self.rpc)
+        if estimating:
+            lines = [
+                f"[b yellow]Network:[/b yellow]   {net}",
+                "",
+                f"[b yellow]From:[/b yellow]      {self.from_addr}",
+                "",
+                f"[b yellow]Current:[/b yellow]   {self._current_baker_label}",
+                "",
+                f"[b yellow]New:[/b yellow]       {self._new_baker_label}",
+            ]
+        elif err:
+            lines = [
+                f"[b yellow]Network:[/b yellow]   {net}",
+                "",
+                f"[b yellow]From:[/b yellow]      {self.from_addr}",
+                "",
+                f"[b yellow]Current:[/b yellow]   {self._current_baker_label}",
+                "",
+                f"[b yellow]New:[/b yellow]       {self._new_baker_label}",
+                "",
+                f"[red]Fee estimate failed:[/red] {err}",
+                "",
+                "You can still CHANGE BAKER (autofill) or use Advanced overrides.",
+            ]
+        else:
+            lines = [
+                f"[b yellow]Network:[/b yellow]   {net}",
+                "",
+                f"[b yellow]From:[/b yellow]      {self.from_addr}",
+                "",
+                f"[b yellow]Current:[/b yellow]   {self._current_baker_label}",
+                "",
+                f"[b yellow]New:[/b yellow]       {self._new_baker_label}",
+            ]
+
+        self.query_one("#summary", Static).update("\n".join(lines))
 
 class SendScreen(ModalScreen[Optional[dict]]):
     """
@@ -7433,8 +8014,9 @@ class SendScreen(ModalScreen[Optional[dict]]):
 
         # Show hint
         if self._quick_destination_addrs:
-            hint = self.query_one("#hint_text", Static)
-            hint.update("[dim]💡 Click below to quick-fill address[/dim]")
+            self._set_hint("[dim]💡 Click below to quick-fill address[/dim]")
+        else:
+            self._set_hint("")
 
     def _load_wallet_balances(self) -> None:
         """Load wallet balances without blocking UI (threaded)."""
@@ -7442,13 +8024,12 @@ class SendScreen(ModalScreen[Optional[dict]]):
 
         indices = list(range(len(self.accounts)))
         if self.selected_account:
-            try:
-                sel_idx = next(
-                    i for i, acc in enumerate(self.accounts) if acc.address == self.selected_account.address
-                )
+            sel_idx = next(
+                (i for i, acc in enumerate(self.accounts) if acc.address == self.selected_account.address),
+                None,
+            )
+            if sel_idx is not None:
                 indices = [sel_idx] + [i for i in indices if i != sel_idx]
-            except StopIteration:
-                pass
 
         for idx in indices:
             acc = self.accounts[idx]
@@ -7481,7 +8062,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
                     self.balance_xtz = balance_xtz
                     self._balance_loading = False
 
-            except Exception as e:
+            except _FLOW_PRECHECK_EXCEPTIONS as e:
                 log_error(f"Failed to load balance for {acc.name}", exception=e)
 
     def _update_send_wallet_row(self, idx: int, label_text: str) -> None:
@@ -7493,8 +8074,9 @@ class SendScreen(ModalScreen[Optional[dict]]):
                 item = list_items[idx]
                 label = item.query_one(Label)
                 label.update(label_text)
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update send wallet row", exception=e)
+
     @on(ListView.Selected, "#wallet_selector")
     def wallet_selected(self, event: ListView.Selected) -> None:
         """Handle wallet selection from ListView."""
@@ -7533,7 +8115,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
             balance_xtz = mutez_to_xtz(balance_mutez)
             self._balance_cache[addr] = balance_xtz
             self.app.call_from_thread(self._apply_selected_balance, addr, balance_xtz)
-        except Exception as e:
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
             log_error("Failed to get wallet balance", exception=e)
 
     def _apply_selected_balance(self, address: str, balance_xtz: Decimal) -> None:
@@ -7542,6 +8124,12 @@ class SendScreen(ModalScreen[Optional[dict]]):
         self.balance_xtz = balance_xtz
         self._balance_loading = False
         self._blocked_new_wallet = self.balance_xtz <= 0
+
+    def _set_amount_comment(self, text: str) -> None:
+        self.query_one("#amount_comment", Static).update(text)
+
+    def _set_hint(self, text: str) -> None:
+        self.query_one("#hint_text", Static).update(text)
 
     @on(ListView.Selected, "#quick_destinations")
     def destination_selected(self, event: ListView.Selected) -> None:
@@ -7559,8 +8147,6 @@ class SendScreen(ModalScreen[Optional[dict]]):
     @on(Input.Changed, "#amount_input")
     def on_amount_changed(self, event: Input.Changed) -> None:
         """Show sassy comment based on amount entered."""
-        comment_widget = self.query_one("#amount_comment", Static)
-
         try:
             amount_input = self.query_one("#amount_input", Input)
             filtered = filter_amount_input(event.value)
@@ -7568,20 +8154,19 @@ class SendScreen(ModalScreen[Optional[dict]]):
                 amount_input.value = filtered
             value = sanitize_input(filtered)
             if not value:
-                comment_widget.update("")
+                self._set_amount_comment("")
                 return
 
             amount = Decimal(value)
             if amount <= 0:
-                comment_widget.update("")
+                self._set_amount_comment("")
                 return
 
             # Show sassy comment based on amount
-            from sassy_wallet.messages.send_commentary import get_amount_comment
             comment = get_amount_comment(amount)
-            comment_widget.update(f"[dim italic]{comment}[/dim italic]")
+            self._set_amount_comment(f"[dim italic]{comment}[/dim italic]")
         except (ValueError, decimal.InvalidOperation):
-            comment_widget.update("")
+            self._set_amount_comment("")
 
     @on(Input.Changed, "#to_input")
     def on_to_changed(self, event: Input.Changed) -> None:
@@ -7589,18 +8174,17 @@ class SendScreen(ModalScreen[Optional[dict]]):
         filtered = filter_base58_input(event.value)
         if filtered != event.value:
             to_input.value = filtered
-        hint = self.query_one("#hint_text", Static)
         if not filtered:
-            hint.update("")
+            self._set_hint("")
             return
         if len(filtered) < 36:
-            hint.update(f"[dim]Address length: {len(filtered)}/36[/dim]")
+            self._set_hint(f"[dim]Address length: {len(filtered)}/36[/dim]")
             return
         is_valid, error_msg = validate_tezos_address(filtered, allow_kt1=True)
         if not is_valid:
-            hint.update(f"[red]✗ {error_msg}[/red]")
+            self._set_hint(f"[red]✗ {error_msg}[/red]")
         else:
-            hint.update("[#34d399]✓ Address looks valid[/#34d399]")
+            self._set_hint("[#34d399]✓ Address looks valid[/#34d399]")
 
     @on(Input.Submitted, "#to_input")
     async def to_submitted(self, event: Input.Submitted) -> None:
@@ -7614,16 +8198,13 @@ class SendScreen(ModalScreen[Optional[dict]]):
     async def next_pressed(self) -> None:
         """Validate and return data."""
         if not self.selected_account:
-            comment = self.query_one("#amount_comment", Static)
-            comment.update("[red]✗ Please select a wallet first[/red]")
+            self._set_amount_comment("[red]✗ Please select a wallet first[/red]")
             return
         if self._balance_loading:
-            comment = self.query_one("#amount_comment", Static)
-            comment.update("[dim]⏳ Balance still loading...[/dim]")
+            self._set_amount_comment("[dim]⏳ Balance still loading...[/dim]")
             return
         if self._blocked_new_wallet:
-            comment = self.query_one("#amount_comment", Static)
-            comment.update(
+            self._set_amount_comment(
                 "[red]⚠️ No balance in this wallet, dude! What are you sending? Croissants? ¬_¬[/red]"
             )
             return
@@ -7633,21 +8214,18 @@ class SendScreen(ModalScreen[Optional[dict]]):
         to_addr = sanitize_input(to_input.value)
 
         if not to_addr:
-            hint = self.query_one("#hint_text", Static)
-            hint.update("[red]✗ Please enter a destination address[/red]")
+            self._set_hint("[red]✗ Please enter a destination address[/red]")
             to_input.focus()
             return
 
         # Validate address
         is_valid, error_msg = validate_tezos_address(to_addr, allow_kt1=True)
         if not is_valid:
-            hint = self.query_one("#hint_text", Static)
-            hint.update(f"[red]✗ {error_msg}[/red]")
+            self._set_hint(f"[red]✗ {error_msg}[/red]")
             to_input.focus()
             return
         if self.selected_account and to_addr == self.selected_account.address:
-            hint = self.query_one("#hint_text", Static)
-            hint.update("[red]✗ Cannot send to the same wallet[/red]")
+            self._set_hint("[red]✗ Cannot send to the same wallet[/red]")
             to_input.focus()
             return
 
@@ -7656,16 +8234,14 @@ class SendScreen(ModalScreen[Optional[dict]]):
         amount_str = sanitize_input(amount_input.value)
 
         if not amount_str:
-            comment = self.query_one("#amount_comment", Static)
-            comment.update("[red]✗ Please enter an amount[/red]")
+            self._set_amount_comment("[red]✗ Please enter an amount[/red]")
             amount_input.focus()
             return
 
         # Validate amount
         is_valid, error_msg, amount = validate_amount(amount_str, min_value=Decimal("0"))
         if not is_valid:
-            comment = self.query_one("#amount_comment", Static)
-            comment.update(f"[red]✗ {error_msg}[/red]")
+            self._set_amount_comment(f"[red]✗ {error_msg}[/red]")
             amount_input.focus()
             return
 
@@ -7674,8 +8250,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
         total_needed = amount + estimated_max_fee
 
         if self.balance_xtz < total_needed:
-            comment = self.query_one("#amount_comment", Static)
-            comment.update(
+            self._set_amount_comment(
                 f"[red]✗ Insufficient balance. Have: {format_xtz(self.balance_xtz)} XTZ, "
                 f"Need: ~{format_xtz(total_needed)} XTZ (including fees)[/red]"
             )
@@ -7689,9 +8264,9 @@ class SendScreen(ModalScreen[Optional[dict]]):
             try:
                 pw = await self.app.push_screen_wait(  # type: ignore[attr-defined]
                     SendPassphraseScreen(
-                        "🔐 Enter Your Passphrase",
+                        "Enter Your Encryption Password",
                         password=True,
-                        placeholder="Your wallet passphrase",
+                        placeholder="Your wallet encryption password",
                         wallet_info=f"[b]{self.selected_account.name}[/b]",
                         ok_label="Next →",
                         fun_note="The moment of truth! Like opening a safe, but cooler. 🔓✨",
@@ -7702,7 +8277,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
             finally:
                 self.query_one("#send_root", Vertical).remove_class("hidden")
 
-            if pw == "__BACK__":
+            if pw == BACK_NAV_MARKER:
                 return
 
             if not pw:
@@ -7713,9 +8288,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
             try:
                 secret = decrypt_secret(self.selected_account.enc, pw)
                 key = key_from_encoded_secret(secret)
-            except Exception as e:
-                from cryptography.exceptions import InvalidTag
-
+            except _CRYPTO_DECODE_EXCEPTIONS as e:
                 log_error("Failed to decrypt secret key", exception=e)
                 if isinstance(e, InvalidTag):
                     error_note = "❌ Wrong passphrase. Try again."
@@ -7732,7 +8305,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
             finally:
                 self.query_one("#send_root", Vertical).remove_class("hidden")
 
-            if resp and resp.get("__BACK__"):
+            if resp and resp.get(BACK_NAV_MARKER):
                 continue
 
             if not resp or not resp.get("ok"):
@@ -7758,19 +8331,16 @@ class SendScreen(ModalScreen[Optional[dict]]):
         self.dismiss(None)
 
     def on_key(self, event) -> None:
-        from textual.widgets import Input
-
         key = getattr(event, "key", None)
 
         # Let Input handle keys naturally, but allow escape to blur first
-        if isinstance(self.app.focused, Input):
-            if key == "escape":
-                try:
-                    self.query_one("#cancel", Button).focus()
-                except Exception as e:
-                    log_debug("Failed to focus cancel button in send screen", exception=str(e))
-                event.stop()
-                return
+        if _handle_input_escape_focus_cancel(
+            self,
+            event,
+            key,
+            context="send screen",
+            fallbacks=(("#next", Button),),
+        ):
             return
 
         if key == "escape":
@@ -7915,39 +8485,43 @@ class DestinationPickerScreen(ModalScreen[str]):
     def _current_value(self) -> str:
         return (self.query_one("#dest_inp", Input).value or "").strip()
 
+    def _set_dest_hint(self, text: str) -> None:
+        self.query_one("#dest_validation_hint", Static).update(text)
+
+    def _set_sassy_comment(self, text: str) -> None:
+        self.query_one("#sassy_comment", Static).update(text)
+
     @on(Input.Changed, "#dest_inp")
     def on_dest_input_changed(self, event: Input.Changed) -> None:
         """Validate destination address in real-time."""
         value = sanitize_input(event.value)
-        hint_widget = self.query_one("#dest_validation_hint", Static)
-        sassy_widget = self.query_one("#sassy_comment", Static)
 
         if not value:
-            hint_widget.update("")
-            sassy_widget.update("")
+            self._set_dest_hint("")
+            self._set_sassy_comment("")
             return
 
         # Check if sending to self
         if value == self.from_address:
-            hint_widget.update("[red]✗ Cannot send to yourself[/red]")
-            sassy_widget.update("")
+            self._set_dest_hint("[red]✗ Cannot send to yourself[/red]")
+            self._set_sassy_comment("")
             return
 
         # Validate address
         is_valid, error_msg = validate_tezos_address(value, allow_kt1=True)
         if is_valid:
-            hint_widget.update("[#34d399]✓ Valid Tezos address[/#34d399]")
+            self._set_dest_hint("[#34d399]✓ Valid Tezos address[/#34d399]")
             # Show a sassy comment when address is valid
-            sassy_widget.update(f"[dim italic]{get_recipient_comment()}[/dim italic]")
+            self._set_sassy_comment(f"[dim italic]{get_recipient_comment()}[/dim italic]")
         else:
-            sassy_widget.update("")
+            self._set_sassy_comment("")
             # Only show error if the address looks complete (36 characters)
             if len(value) >= 36:
-                hint_widget.update(f"[red]✗ {error_msg}[/red]")
+                self._set_dest_hint(f"[red]✗ {error_msg}[/red]")
             elif len(value) > 3:
-                hint_widget.update("[yellow]⏳ Enter complete address (36 characters)...[/yellow]")
+                self._set_dest_hint("[yellow]⏳ Enter complete address (36 characters)...[/yellow]")
             else:
-                hint_widget.update("")
+                self._set_dest_hint("")
 
     @on(Input.Submitted, "#dest_inp")
     def submitted(self, event: Input.Submitted) -> None:
@@ -7980,17 +8554,17 @@ class DestinationPickerScreen(ModalScreen[str]):
     def on_key(self, event) -> None:
         key = getattr(event, "key", None)
 
-        if isinstance(self.app.focused, Input):
-            if key == "escape":
-                try:
-                    self.query_one("#cancel", Button).focus()
-                except Exception as e:
-                    log_debug("Failed to focus cancel button in destination picker", exception=str(e))
-                event.stop()
-                return
+        if _handle_input_escape_focus_cancel(
+            self,
+            event,
+            key,
+            context="destination picker",
+            fallbacks=(("#ok", Button),),
+        ):
+            return
 
         if key == "escape":
-            self.dismiss("")
+            self.cancel_pressed()
             event.stop()
             return
 
@@ -8001,7 +8575,7 @@ class DestinationPickerScreen(ModalScreen[str]):
                 if inp.has_focus:
                     lv.focus()
                     return
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_error("Failed to handle down key in destination picker", exception=e)
 
         if key == "enter":
@@ -8012,7 +8586,7 @@ class DestinationPickerScreen(ModalScreen[str]):
                     if 0 <= idx < len(self.recents):
                         self.dismiss(self.recents[idx])
                         return
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_error("Failed to handle enter key in destination picker", exception=e)
 
 
@@ -8371,41 +8945,41 @@ class WalletApp(App):
         color: $accent;
     }
 
-    #history_header {
-        width: 50%;
-        padding-left: 2;
-        color: $accent;
-        background: $surface;
-    }
+	    #history_header {
+	        width: 60%;
+	        padding-left: 2;
+	        color: $accent;
+	        background: $surface;
+	    }
 
-    #tx_detail_header {
-        width: 50%;
-        padding-left: 1;
-        color: $accent;
-        background: $surface;
-        border-left: solid $primary;
-    }
+	    #tx_detail_header {
+	        width: 40%;
+	        padding-left: 1;
+	        color: $accent;
+	        background: $surface;
+	        border-left: solid $primary;
+	    }
 
     #history_split {
         height: 1fr;
     }
 
-    #history {
-        width: 50%;
-        height: 100%;
-    }
+	    #history {
+	        width: 60%;
+	        height: 100%;
+	    }
 
     #history > ListItem {
         padding: 0 0 0 2;
     }
 
-    #tx_detail_pane {
-        width: 50%;
-        height: 100%;
-        padding: 1;
-        border-left: solid $primary;
-        overflow-y: auto;
-    }
+	    #tx_detail_pane {
+	        width: 40%;
+	        height: 100%;
+	        padding: 1;
+	        border-left: solid $primary;
+	        overflow-y: auto;
+	    }
 
     #tx_detail_content {
         height: auto;
@@ -8484,6 +9058,11 @@ class WalletApp(App):
         background: #2a1f0a;
     }
 
+    #bottom_bar.status-warning-dim {
+        border: heavy #a16207;
+        background: #241c0f;
+    }
+
     #bottom_bar.status-error {
         border: heavy #dc2626;
         background: #2a0f12;
@@ -8494,24 +9073,25 @@ class WalletApp(App):
         background: #0f1a2e;
     }
 
+    /* Stake/Unstake: higher-contrast pulse so the blink is obvious in terminals. */
     #bottom_bar.status-stake {
-        border: heavy #8b5cf6;
-        background: #1b1324;
+        border: heavy #a855f7;
+        background: #240a38;
     }
 
     #bottom_bar.status-unstake {
-        border: heavy #8b5cf6;
-        background: #1e1626;
+        border: heavy #a855f7;
+        background: #2a0b3f;
     }
 
     #bottom_bar.status-stake-dim {
-        border: heavy #a78bfa;
-        background: #231b2e;
+        border: heavy #6d28d9;
+        background: #14061f;
     }
 
     #bottom_bar.status-unstake-dim {
-        border: heavy #a78bfa;
-        background: #231b2e;
+        border: heavy #6d28d9;
+        background: #14061f;
     }
 
     #status_line.status-success {
@@ -8534,6 +9114,11 @@ class WalletApp(App):
         background: #2a1f0a;
     }
 
+    #status_line.status-warning-dim {
+        color: #ca8a04;
+        background: #241c0f;
+    }
+
     #status_line.status-error {
         color: #ef4444;
         background: #2a0f12;
@@ -8545,23 +9130,23 @@ class WalletApp(App):
     }
 
     #status_line.status-stake {
-        color: #c4b5fd;
-        background: #1b1324;
+        color: #f5d0fe;
+        background: #240a38;
     }
 
     #status_line.status-unstake {
-        color: #e9d5ff;
-        background: #1e1626;
+        color: #f5d0fe;
+        background: #2a0b3f;
     }
 
     #status_line.status-stake-dim {
-        color: #c4b5fd;
-        background: #231b2e;
+        color: #c084fc;
+        background: #14061f;
     }
 
     #status_line.status-unstake-dim {
-        color: #c4b5fd;
-        background: #231b2e;
+        color: #c084fc;
+        background: #14061f;
     }
 
     /* Processing state with yellow glow (breathing effect handled by timer) */
@@ -8628,11 +9213,34 @@ class WalletApp(App):
         self._pending_ops_lock = RLock()       # Protects self._pending_ops
 
         self.store = load_store()
-        self.rpc = self.store.get("rpc") or Config.RPC_DEFAULT_GHOSTNET
+        stored_rpc = self.store.get("rpc")
+        self.rpc, rpc_replaced = _normalize_rpc_runtime(
+            stored_rpc,
+            fallback=Config.RPC_DEFAULT_GHOSTNET,
+        )
+        if rpc_replaced:
+            self.store["rpc"] = self.rpc
+            save_store(self.store)
+            log_warning(
+                "Invalid RPC in store; reset to safe default",
+                invalid_rpc=stored_rpc,
+                fallback_rpc=self.rpc,
+            )
         logging.info(f"RPC: {self.rpc}")
         self.accounts = list_accounts(self.store)
         logging.info(f"Loaded {len(self.accounts)} account(s)")
         self.selected: Account | None = None
+        self._startup_notice: str | None = None
+        migration = get_last_migration()
+        if migration:
+            to_path = migration.get("to", "")
+            display_path = to_path
+            try:
+                display_path = display_path.replace(str(Path.home()), "~")
+            except (TypeError, ValueError) as e:
+                log_debug("Failed to normalize migration path for startup notice", exception=str(e))
+            if display_path:
+                self._startup_notice = f"ℹ️ Wallet data moved to {display_path} (legacy kept)."
 
         self.history_cache: dict[tuple[str, int], list[dict]] = {}
         self.history_items: list[dict] = []
@@ -8654,6 +9262,19 @@ class WalletApp(App):
             }
         else:
             self._pending_ops = {}
+
+        # Operation entrypoint overrides (hash -> entrypoint).
+        # Used to preserve custom semantics (e.g. "change_baker" is a delegation under the hood,
+        # but should remain labeled as "CH / BAKER CHANGED" in history even after refresh).
+        raw_overrides = self.store.get("op_entrypoint_overrides", {})
+        if isinstance(raw_overrides, dict):
+            self._op_entrypoint_overrides: dict[str, str] = {
+                str(k): str(v)
+                for k, v in raw_overrides.items()
+                if k and isinstance(k, str) and v and isinstance(v, str)
+            }
+        else:
+            self._op_entrypoint_overrides = {}
         self._pending_shimmer_i: int = 0
         self._pending_shimmer_timer = None
 
@@ -8701,11 +9322,23 @@ class WalletApp(App):
 
         self._send_in_progress: bool = False
         self._send_in_progress_token: float | None = None
+        self._tx_watchdog_token: float | None = None
+        self._tx_watchdog_action: str | None = None
+        self._tx_watchdog_timer = None
+        self._tx_watchdog_notice_timer = None
+        self._stake_flow_in_progress: bool = False
+        self._stake_button_cooldown_until: float = 0.0
 
         self._copy_blink_timer = None
         self._copy_blink_active = False
         self._copy_blink_i = 0
         self._copy_blink_addr = ""
+
+        # One-time hardening for existing local backup artifacts.
+        try:
+            ensure_private_files_in_dir(Path("data/backups"), suffixes=(".json",))
+        except _LOCAL_IO_EXCEPTIONS as e:
+            log_warning("Failed to harden backup file permissions", exception=e)
 
         # Migrate from old global recent_to to per-wallet recent_to_by_wallet
         if "recent_to_by_wallet" not in self.store:
@@ -8756,7 +9389,7 @@ class WalletApp(App):
 
                 # Recent Transactions section with split view
                 yield Static(
-                    f"[b]Oven Log[/b] (last {self.history_limit} fresh goodies)",
+                    self._history_title_text(),
                     id="hist_title",
                     markup=True,
                 )
@@ -8792,6 +9425,12 @@ class WalletApp(App):
         # Auto-pick an RPC that supports BOTH simulation and injection.
         # Many public RPCs are read-only or restrict sensitive endpoints.
         self._autodetect_rpc()
+        if self._startup_notice:
+            notice = self._startup_notice
+            self._schedule_after(
+                0.5,
+                lambda n=notice: self._set_status_styled(n, style="info", duration=6.0, force=True),
+            )
 
         # Start auto-refresh if enabled
         if self._auto_refresh_enabled:
@@ -8800,31 +9439,42 @@ class WalletApp(App):
     def on_resize(self, event) -> None:
         try:
             self._maybe_warn_terminal_size(event.size)
-        except Exception as e:
+        except (AttributeError, TypeError, ValueError) as e:
             log_debug("Failed to handle resize event", exception=str(e))
 
     def copy_to_clipboard(self, text: str) -> None:
         """Copy text to the OS clipboard with CLI fallbacks for TUI environments."""
         last_error: Exception | None = None
+        safe_env = dict(os.environ)
+        safe_env["PATH"] = os.environ.get("PATH", "")
         for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
             if shutil.which(cmd[0]) is None:
                 continue
             try:
-                subprocess.run(cmd, input=text, text=True, check=True)
+                # Command argv is a fixed allowlist (no shell, no user-selected executable).
+                subprocess.run(
+                    cmd,
+                    input=text,
+                    text=True,
+                    check=True,
+                    timeout=3,
+                    close_fds=True,
+                    env=safe_env,
+                )  # nosec B603
                 return
-            except Exception as e:
+            except (subprocess.SubprocessError, OSError, ValueError) as e:
                 last_error = e
         try:
             import pyperclip  # type: ignore
 
             pyperclip.copy(text)
             return
-        except Exception as e:
+        except (ImportError, RuntimeError, AttributeError, OSError, ValueError) as e:
             last_error = e
         try:
             super().copy_to_clipboard(text)
             return
-        except Exception as e:
+        except (RuntimeError, AttributeError, OSError) as e:
             last_error = e
         if last_error:
             raise last_error
@@ -8835,7 +9485,7 @@ class WalletApp(App):
         try:
             width = getattr(size, "width", 0)
             height = getattr(size, "height", 0)
-        except Exception:
+        except (AttributeError, TypeError):
             return
         if width < 120 or height < 35:
             if not self._last_status:
@@ -8869,28 +9519,11 @@ class WalletApp(App):
         CRITICAL: Block app-level keybindings when a modal is open.
         This prevents actions from firing behind the modal.
         """
-        from textual.screen import ModalScreen
-
         if isinstance(self.screen, ModalScreen):
             key = getattr(event, "key", None)
-            if key in ("left", "right") and isinstance(self.focused, Button):
-                parent = self.focused.parent
-                if isinstance(parent, Horizontal):
-                    focusables = [
-                        c
-                        for c in parent.children
-                        if isinstance(c, Button) and not c.has_class("hidden") and getattr(c, "visible", True)
-                    ]
-                    if self.focused in focusables:
-                        idx = focusables.index(self.focused)
-                        if key == "left" and idx > 0:
-                            focusables[idx - 1].focus()
-                            event.stop()
-                            return
-                        if key == "right" and idx < len(focusables) - 1:
-                            focusables[idx + 1].focus()
-                            event.stop()
-                            return
+            if _move_focus_in_button_row(self.focused, key, include_hidden=False, require_visible=True):
+                event.stop()
+                return
             event.stop()
             return
         # If no modal, let normal key handling proceed (bindings, etc.)
@@ -8899,14 +9532,14 @@ class WalletApp(App):
         if key == "down" and self.focused is None:
             try:
                 self.query_one("#add", Button).focus()
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_debug("Failed to focus add button from keyboard", exception=str(e))
             event.stop()
             return
         if key == "up" and self.focused is None:
             try:
                 self.query_one("#send", Button).focus()
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_debug("Failed to focus send button from keyboard", exception=str(e))
             event.stop()
             return
@@ -8940,7 +9573,7 @@ class WalletApp(App):
                     try:
                         self.copy_to_clipboard(addr)
                         self._start_copy_blink(addr)
-                    except Exception as e:
+                    except (RuntimeError, OSError, ValueError, ImportError) as e:
                         log_warning("Clipboard copy failed", exception=e, address=addr)
                         self._set_status(f"❌ Copy failed. Address: {addr}")
                     event.stop()
@@ -8982,7 +9615,7 @@ class WalletApp(App):
             if self.focused is not None:
                 try:
                     self.set_focus(None)
-                except Exception as e:
+                except _UI_CALLBACK_EXCEPTIONS as e:
                     log_debug("Failed to clear focus on escape", exception=str(e))
                 event.stop()
                 return
@@ -9029,7 +9662,7 @@ class WalletApp(App):
         try:
             self.copy_to_clipboard(addr)
             self._start_copy_blink(addr)
-        except Exception as e:
+        except (RuntimeError, OSError, ValueError, ImportError) as e:
             log_warning("Clipboard copy failed", exception=e, address=addr)
             self._set_status(f"❌ Copy failed. Address: {addr}")
         event.stop()
@@ -9049,7 +9682,7 @@ class WalletApp(App):
         try:
             self.copy_to_clipboard(addr)
             self._start_copy_blink(addr)
-        except Exception as e:
+        except (RuntimeError, OSError, ValueError, ImportError) as e:
             log_warning("Clipboard copy failed", exception=e, address=addr)
             self._set_status(f"❌ Copy failed. Address: {addr}")
         event.stop()
@@ -9125,6 +9758,11 @@ class WalletApp(App):
         """Return remaining seconds to honor the standardized tx flow duration."""
         return max(0.0, (start_ts + Config.TX_FLOW_TOTAL_SECONDS) - time.time())
 
+    def _tx_flow_remaining_or_default(self, start_ts: float) -> float:
+        """Return remaining tx flow time or fallback to the default flow duration."""
+        remaining = self._tx_flow_remaining(start_ts)
+        return remaining if remaining > 0.1 else Config.TX_FLOW_TOTAL_SECONDS
+
     def _schedule_after(self, delay_seconds: float, fn: Callable[[], None]) -> None:
         if delay_seconds <= 0:
             fn()
@@ -9155,7 +9793,7 @@ class WalletApp(App):
             text = f"ꜩ XTZ Price: ${price:,.2f}"
         try:
             self.query_one("#price_indicator", Static).update(text)
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update price indicator", exception=e)
 
     def _start_rpc_pulse(self) -> None:
@@ -9177,7 +9815,7 @@ class WalletApp(App):
             else:
                 dot = "[red]●[/red]"
             self.query_one("#rpc_indicator", Static).update(f"{dot} {self._rpc_short or 'RPC'}")
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update RPC indicator", exception=e)
 
     def _with_rpc_fallback(
@@ -9192,14 +9830,21 @@ class WalletApp(App):
         """Retry an action on a different RPC when we hit stale-branch errors."""
         try:
             return rpc, fn(rpc)
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             if not is_stale_branch_error(e):
                 raise
             log_warning("Stale branch detected, attempting RPC fallback", action=action, error=str(e))
             if require_stake_support and source_address:
                 new_rpc, can_send, _, can_stake = self._ensure_working_rpc_for_stake(source_address)
-                if not can_send or not can_stake:
+                if not can_send:
                     raise
+                if not can_stake:
+                    log_warning(
+                        "Stake support probe failed during stale-branch fallback; retrying anyway",
+                        action=action,
+                        source_address=source_address,
+                        rpc=new_rpc,
+                    )
             else:
                 new_rpc, can_send, _ = self._ensure_working_rpc()
                 if not can_send:
@@ -9244,7 +9889,7 @@ class WalletApp(App):
             app_tid = getattr(self, "_thread_id", None)
             if app_tid is not None and threading.get_ident() == app_tid:
                 return fn(*args, **kwargs)
-        except Exception as e:
+        except (AttributeError, RuntimeError, TypeError) as e:
             log_error("Failed to check thread ID in _ui", exception=e)
         return self.call_from_thread(fn, *args, **kwargs)
 
@@ -9297,7 +9942,7 @@ class WalletApp(App):
         self._spin_i += 1
         try:
             self.query_one("#status_line", Static).update(display)
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update spinner display", exception=e)
 
     # -------------------------
@@ -9347,11 +9992,14 @@ class WalletApp(App):
         """
         if self._status_lock_until_refresh and not force:
             return
+        if self._is_error_status(text):
+            self._set_status_styled(text, style="error", duration=0.0, force=force)
+            return
         self._last_status = text
         # Status messages shown in status_line
         try:
             self.query_one("#status_line", Static).update(text)
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update status line", exception=e)
 
     def _set_status_styled(self, text: str, style: str = "default", duration: float = 4.0, *, force: bool = False) -> None:
@@ -9366,6 +10014,8 @@ class WalletApp(App):
         if self._status_lock_until_refresh and not force:
             return
         self._last_status = text
+        if style != "error" and self._is_error_status(text):
+            style = "error"
 
         try:
             status_widget = self.query_one("#status_line", Static)
@@ -9375,19 +10025,7 @@ class WalletApp(App):
             status_widget.update(text)
 
             # Remove all status classes first
-            for cls in [
-                "status-success",
-                "status-success-dim",
-                "status-warning",
-                "status-error",
-                "status-info",
-                "status-stake",
-                "status-stake-dim",
-                "status-unstake",
-                "status-unstake-dim",
-                "status-processing",
-                "status-processing-dim",
-            ]:
+            for cls in _STATUS_STYLE_CLASSES:
                 status_widget.remove_class(cls)
                 bottom_bar.remove_class(cls)
 
@@ -9401,7 +10039,7 @@ class WalletApp(App):
                 if duration > 0:
                     self.set_timer(duration, lambda: self._revert_status_style())
 
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to set styled status", exception=e)
 
     def _revert_status_style(self) -> None:
@@ -9412,29 +10050,50 @@ class WalletApp(App):
             status_widget = self.query_one("#status_line", Static)
             bottom_bar = self.query_one("#bottom_bar", Horizontal)
 
-            for cls in [
-                "status-success",
-                "status-success-dim",
-                "status-warning",
-                "status-error",
-                "status-info",
-                "status-stake",
-                "status-stake-dim",
-                "status-unstake",
-                "status-unstake-dim",
-                "status-processing",
-                "status-processing-dim",
-            ]:
+            for cls in _STATUS_STYLE_CLASSES:
                 status_widget.remove_class(cls)
                 bottom_bar.remove_class(cls)
 
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to revert status style", exception=e)
+
+    @staticmethod
+    def _is_error_status(text: str) -> bool:
+        if not text:
+            return False
+        if "❌" in text:
+            return True
+        lowered = text.lower()
+        if "[red]" in lowered:
+            return True
+        error_hints = (
+            "error",
+            "failed",
+            "invalid",
+            "mismatch",
+            "not found",
+            "no rpc",
+            "cannot",
+            "unable",
+            "denied",
+        )
+        return any(hint in lowered for hint in error_hints)
 
     def _set_status_styled_locked(self, text: str, style: str) -> None:
         """Set a styled status that stays until refresh."""
         self._status_lock_until_refresh = True
         self._set_status_styled(text, style=style, duration=0.0, force=True)
+
+    def _stop_timer_attr(self, attr_name: str, *, debug_message: str) -> None:
+        """Stop a timer attribute safely and clear it."""
+        timer = getattr(self, attr_name, None)
+        if not timer:
+            return
+        try:
+            timer.stop()
+        except _UI_CALLBACK_EXCEPTIONS as e:
+            log_debug(debug_message, exception=str(e))
+        setattr(self, attr_name, None)
 
     def _send_failsafe(self, token: float, address: str) -> None:
         if not self._send_in_progress or self._send_in_progress_token != token:
@@ -9447,9 +10106,128 @@ class WalletApp(App):
             self._clear_account_loading(address)
             self._refresh_account_row(address)
             self._set_busy(False)
-            self._set_status("⚠️ Send stalled — oven cooling. Try again in 30s.", force=True)
-        except Exception as e:
+            self._set_status("⚠️ Send stalled — oven cooling. Try again in 1-2 min.", force=True)
+        except _UI_CALLBACK_EXCEPTIONS as e:
             log_warning("Failed to apply send failsafe cleanup", exception=e, address=address)
+
+    def _start_tx_watchdog(self, action: str, address: str) -> float:
+        token = time.time()
+        self._tx_watchdog_token = token
+        self._tx_watchdog_action = action
+        self._stop_timer_attr("_tx_watchdog_timer", debug_message="Failed to stop tx watchdog timer")
+        self._stop_timer_attr(
+            "_tx_watchdog_notice_timer",
+            debug_message="Failed to stop tx watchdog notice timer",
+        )
+        self._tx_watchdog_notice_timer = self.set_timer(
+            Config.TX_RPC_TIMEOUT_SECONDS,
+            lambda: self._tx_watchdog_notice(token, action, address),
+        )
+        self._tx_watchdog_timer = self.set_timer(
+            Config.TX_RPC_HARD_TIMEOUT_SECONDS,
+            lambda: self._tx_watchdog_fire(token, action, address),
+        )
+        return token
+
+    def _stop_tx_watchdog(self, token: float) -> None:
+        if self._tx_watchdog_token != token:
+            return
+        self._tx_watchdog_token = None
+        self._tx_watchdog_action = None
+        self._stop_timer_attr("_tx_watchdog_timer", debug_message="Failed to stop tx watchdog timer")
+        self._stop_timer_attr(
+            "_tx_watchdog_notice_timer",
+            debug_message="Failed to stop tx watchdog notice timer",
+        )
+
+    def _tx_watchdog_message(self, action: str, *, timed_out: bool) -> str:
+        base = {
+            "stake": "Stake",
+            "unstake": "Unstake",
+            "delegate": "Delegation",
+            "change_baker": "Change baker",
+        }.get(action, "Transaction")
+        if timed_out:
+            return f"⏳ {base} timed out - check history; retry in 1-2 min if no op."
+        return f"⏳ {base} is taking longer than usual… still working."
+
+    def _tx_watchdog_notice(self, token: float, action: str, address: str) -> None:
+        if self._tx_watchdog_token != token:
+            return
+        # Soft timeout: keep the breathing effect, just update the message.
+        try:
+            self._set_status(self._tx_watchdog_message(action, timed_out=False), force=True)
+        except _UI_CALLBACK_EXCEPTIONS as e:
+            log_warning("Failed to apply tx watchdog notice", exception=e, action=action, address=address)
+
+    def _tx_watchdog_fire(self, token: float, action: str, address: str) -> None:
+        if self._tx_watchdog_token != token:
+            return
+        self._tx_watchdog_token = None
+        self._tx_watchdog_action = None
+        self._stop_timer_attr("_tx_watchdog_timer", debug_message="Failed to stop tx watchdog timer")
+        self._stop_timer_attr(
+            "_tx_watchdog_notice_timer",
+            debug_message="Failed to stop tx watchdog notice timer",
+        )
+        log_warning("TX watchdog triggered", action=action, address=address)
+        try:
+            self._stop_breathing_effect()
+            self._set_busy(False)
+            self._status_lock_until_refresh = False
+            self._set_status_styled(
+                self._tx_watchdog_message(action, timed_out=True),
+                style="error",
+                duration=6.0,
+                force=True,
+            )
+            if address:
+                self._schedule_after(60.0, lambda: self._silent_refresh_history_for(address))
+        except _UI_CALLBACK_EXCEPTIONS as e:
+            log_warning("Failed to apply tx watchdog cleanup", exception=e, action=action, address=address)
+
+    def _tx_finalize_failsafe(self, action: str, address: str) -> None:
+        """Stop lingering tx visuals if a finalize callback never executed."""
+        # Even if breathing already stopped (e.g. success status rendered),
+        # the status lock may still be active and must be released.
+        if not self._breathing_active and not self._status_lock_until_refresh:
+            return
+        log_warning("TX finalize failsafe triggered", action=action, address=address)
+        if self._breathing_active:
+            self._stop_breathing_effect()
+        self._set_busy(False)
+        self._status_lock_until_refresh = False
+        if address:
+            self._schedule_after(0.0, lambda: self._silent_refresh_history_for(address))
+
+    def _set_pending_counterparty(self, oph: str, address: str, counterparty: str) -> None:
+        """Update a pending item's counterparty label (e.g. resolve 'The baker' -> tz1...)."""
+        counterparty = (counterparty or "").strip()
+        if not counterparty:
+            return
+        with self._pending_ops_lock:
+            pending = self._pending_ops.get(oph)
+            if not pending or pending.get("address") != address:
+                return
+            pending["counterparty"] = counterparty
+            self._persist_pending_ops()
+        self._update_history_row_for_pending(oph, address)
+
+    def _resolve_delegate_for_pending(self, oph: str, address: str) -> None:
+        """Resolve the current delegate (baker) address and update the pending row."""
+        try:
+            baker_addr = get_delegation_info(self.rpc, address)
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
+            log_warning("Failed to resolve delegate baker for pending row", exception=e, address=address, oph=oph)
+            return
+        if baker_addr:
+            try:
+                label = self._format_baker_label(baker_addr)
+            except _FLOW_PRECHECK_EXCEPTIONS as e:
+                log_warning("Failed to format delegate baker label", exception=e, baker_addr=baker_addr, oph=oph)
+                label = baker_addr
+            label = self._shorten_baker_label(label)
+            self._ui(self._set_pending_counterparty, oph, address, label)
 
     def _start_copy_blink(self, address: str) -> None:
         self._status_lock_until_refresh = False
@@ -9493,7 +10271,7 @@ class WalletApp(App):
         if hasattr(self, "_breathing_timer") and self._breathing_timer:
             try:
                 self._breathing_timer.stop()
-            except Exception as e:
+            except _UI_CALLBACK_EXCEPTIONS as e:
                 log_debug("Failed to stop breathing timer", exception=str(e))
         self._breathing_active = True
         self._breathing_bright = True
@@ -9509,17 +10287,7 @@ class WalletApp(App):
             status_widget.update(text)
 
             # Remove all status classes
-            for cls in [
-                "status-success",
-                "status-warning",
-                "status-error",
-                "status-info",
-                "status-stake",
-                "status-unstake",
-                "status-unstake-dim",
-                "status-processing",
-                "status-processing-dim",
-            ]:
+            for cls in _STATUS_STYLE_CLASSES:
                 status_widget.remove_class(cls)
                 bottom_bar.remove_class(cls)
 
@@ -9538,7 +10306,7 @@ class WalletApp(App):
                 )
                 self._pending_shimmer_i = 0
 
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to start breathing effect", exception=e)
 
     def _toggle_breathing(self) -> None:
@@ -9573,7 +10341,7 @@ class WalletApp(App):
             # Schedule next toggle
             self._breathing_timer = self.set_timer(Config.STATUS_BLINK_INTERVAL_SECONDS, self._toggle_breathing)
 
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to toggle breathing effect", exception=e)
 
     def _stop_breathing_effect(self) -> None:
@@ -9589,20 +10357,11 @@ class WalletApp(App):
             bottom_bar = self.query_one("#bottom_bar", Horizontal)
 
             # Remove breathing classes
-            for cls in [
-                "status-success",
-                "status-success-dim",
-                "status-processing",
-                "status-processing-dim",
-                "status-stake",
-                "status-stake-dim",
-                "status-unstake",
-                "status-unstake-dim",
-            ]:
+            for cls in _STATUS_STYLE_CLASSES:
                 status_widget.remove_class(cls)
                 bottom_bar.remove_class(cls)
 
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to stop breathing effect", exception=e)
 
     def _set_pending_blink(self, active: bool) -> None:
@@ -9626,7 +10385,7 @@ class WalletApp(App):
                     bottom_bar.remove_class(dim_class)
                     status_widget.add_class(bright_class)
                     bottom_bar.add_class(bright_class)
-                except Exception as e:
+                except _UI_QUERY_EXCEPTIONS as e:
                     log_debug("Failed to apply breathing classes for pending shimmer", exception=str(e))
                 self._breathing_timer = self.set_timer(
                     Config.STATUS_BLINK_INTERVAL_SECONDS,
@@ -9636,7 +10395,7 @@ class WalletApp(App):
             if self._pending_shimmer_timer:
                 try:
                     self._pending_shimmer_timer.stop()
-                except Exception as e:
+                except _UI_QUERY_EXCEPTIONS as e:
                     log_debug("Failed to stop pending shimmer timer", exception=str(e))
                 self._pending_shimmer_timer = None
             self._pending_shimmer_i = 0
@@ -9661,33 +10420,8 @@ class WalletApp(App):
             try:
                 label = item.query_one(Label)
                 label.update(self._format_history_line(idx, it))
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_error("Failed to update pending shimmer row", exception=e)
-
-    def _shimmer_text(self, text: str, offset: int, span: int = 2, *, pingpong: bool = False) -> str:
-        if not text:
-            return text
-        n = len(text)
-        if pingpong and n > 1:
-            period = 2 * (n - 1)
-            pos = offset % period
-            if pos >= n:
-                pos = period - pos
-            start = pos
-        else:
-            start = offset % n
-        end = start + max(1, span)
-        parts: list[str] = []
-        for i, ch in enumerate(text):
-            if pingpong:
-                in_span = start <= i < min(end, n)
-            else:
-                in_span = (start <= i < end) or (end > n and i < (end - n))
-            if in_span:
-                parts.append(f"[reverse]{ch}[/reverse]")
-            else:
-                parts.append(ch)
-        return "".join(parts)
 
     def _set_busy(self, busy: bool) -> None:
         for bid in ("#add", "#backup", "#export", "#delete", "#exit", "#refresh", "#send", "#recv", "#stake"):
@@ -9696,8 +10430,14 @@ class WalletApp(App):
             if btns:
                 try:
                     btns.first(Button).disabled = busy
-                except Exception as e:
+                except _UI_QUERY_EXCEPTIONS as e:
                     log_error("Failed to set button busy state", exception=e, button_id=bid)
+        account_lists = self.query("#accounts")
+        if account_lists:
+            try:
+                account_lists.first(ListView).disabled = busy
+            except _UI_QUERY_EXCEPTIONS as e:
+                log_error("Failed to set accounts list busy state", exception=e)
 
     def _update_rpc_indicator(self) -> None:
         """Update the RPC indicator in bottom-right corner with RPC URL."""
@@ -9711,13 +10451,13 @@ class WalletApp(App):
             self._rpc_online = True
             self._render_rpc_indicator()
             self._request_price_refresh()
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update RPC indicator", exception=e)
             try:
                 self._rpc_short = "Offline"
                 self._rpc_online = False
                 self._render_rpc_indicator()
-            except Exception as e2:
+            except _UI_QUERY_EXCEPTIONS as e2:
                 log_error("Failed to set RPC indicator to offline", exception=e2)
 
     def _show_tx_link(self, oph_short: str, tzkt_url: str) -> None:
@@ -9729,26 +10469,35 @@ class WalletApp(App):
         """
         try:
             self.query_one("#tx_link_area", Static).update("")
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to clear transaction link", exception=e)
 
     def _clear_tx_link(self) -> None:
         """Clear the transaction link area."""
         try:
             self.query_one("#tx_link_area", Static).update("")
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to clear transaction link", exception=e)
 
+    def _history_title_text(self, suffix: str = "") -> str:
+        """Build the history title with selected wallet context."""
+        wallet_name = ""
+        if self.selected:
+            wallet_name = str(getattr(self.selected, "name", "") or "").strip()
+        if wallet_name:
+            wallet_name = wallet_name.replace("[", "\\[").replace("]", "\\]")
+            return f"[cyan]{wallet_name}[/cyan] · [b]Oven Log[/b] (last {self.history_limit} fresh goodies){suffix}"
+        else:
+            return f"[dim]no wallet selected[/dim] · [b]Oven Log[/b] (last {self.history_limit} fresh goodies){suffix}"
+
     def _update_history_title(self, suffix: str = "") -> None:
-        self.query_one("#hist_title", Static).update(
-            f"[b]Oven Log[/b] (last {self.history_limit} fresh goodies){suffix}"
-        )
+        self.query_one("#hist_title", Static).update(self._history_title_text(suffix))
 
     def _update_tx_details(self) -> None:
         """Update the transaction details pane with the selected transaction."""
         try:
             detail_pane = self.query_one("#tx_detail_content", Static)
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to query transaction detail pane", exception=e)
             return
 
@@ -9891,7 +10640,7 @@ class WalletApp(App):
         if w is not None and getattr(w, "id", None) == "tx_detail_content":
             try:
                 self.query_one("#add", Button).focus()
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_debug("Failed to focus add button from tx details", exception=str(e))
             return
         if isinstance(w, ListView):
@@ -9923,7 +10672,7 @@ class WalletApp(App):
                     return
                 try:
                     self._focus_tx_details()
-                except Exception:
+                except _UI_QUERY_EXCEPTIONS:
                     self.screen.focus_previous()
                 return
             self.screen.focus_previous()
@@ -9946,7 +10695,7 @@ class WalletApp(App):
             if getattr(w, "id", None) == "history":
                 try:
                     self._focus_tx_details()
-                except Exception:
+                except _UI_QUERY_EXCEPTIONS:
                     self.screen.focus_next()
                 return
             self.screen.focus_next()
@@ -9978,19 +10727,19 @@ class WalletApp(App):
     def _focus_wallet_buttons(self) -> None:
         try:
             self.query_one("#send", Button).focus()
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_debug("Failed to focus wallet buttons", exception=str(e))
 
     def _focus_action_buttons(self) -> None:
         try:
             self.query_one("#send", Button).focus()
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_debug("Failed to focus action buttons", exception=str(e))
 
     def _focus_accounts_header(self) -> None:
         try:
             self.query_one("#add", Button).focus()
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_debug("Failed to focus accounts header", exception=str(e))
 
     def _focus_accounts_list(self) -> None:
@@ -9999,7 +10748,7 @@ class WalletApp(App):
             if lv.index is None:
                 lv.index = 0
             lv.focus()
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_debug("Failed to focus accounts list", exception=str(e))
 
     def _focus_history_list(self) -> None:
@@ -10008,13 +10757,13 @@ class WalletApp(App):
             if lv.index is None:
                 lv.index = 0
             lv.focus()
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_debug("Failed to focus history list", exception=str(e))
 
     def _focus_tx_details(self) -> None:
         try:
             self.query_one("#tx_detail_content", Static).focus()
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_debug("Failed to focus tx details", exception=str(e))
 
     # -------------------------
@@ -10107,11 +10856,20 @@ class WalletApp(App):
     def _select_account_by_address(self, address: str) -> None:
         if not address:
             return
-        try:
-            idx = next(i for i, acc in enumerate(self.accounts) if acc.address == address)
-        except StopIteration:
+        idx = self._account_index_by_address(address)
+        if idx is None:
             return
         self._apply_account_selection(idx)
+
+    def _account_index_by_address(self, address: str) -> Optional[int]:
+        if not address:
+            return None
+        return next((i for i, acc in enumerate(self.accounts) if acc.address == address), None)
+
+    def _history_index_by_hash(self, oph: str) -> Optional[int]:
+        if not oph:
+            return None
+        return next((i for i, it in enumerate(self.history_items) if (it.get("hash") or "") == oph), None)
 
     def _marker_for_address(self, address: str) -> str:
         if address and self._last_selected_addr == address:
@@ -10139,7 +10897,7 @@ class WalletApp(App):
                 addr_label = item.query_one(".account_address", Label)
                 name_label.update(f"{idx + 1:<2} {name_with_tag}")
                 addr_label.update(f"{addr_full}{suffix}")
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_debug(
                     "Failed to update account row labels",
                     exception=str(e),
@@ -10148,13 +10906,13 @@ class WalletApp(App):
                 )
                 label.update(f"{idx + 1:<2} {name_with_tag} │ {addr_full}{suffix}")
             marker_label.update(marker)
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_debug("Failed to render account row", exception=str(e), index=idx)
 
     def _show_account_loading(self, idx: int) -> None:
         try:
             addr = self.accounts[idx].address
-        except Exception:
+        except _UI_QUERY_EXCEPTIONS:
             return
         self._loading_accounts.add(addr)
         self._start_loading_anim()
@@ -10164,22 +10922,20 @@ class WalletApp(App):
         self._loading_accounts.discard(address)
         if not self._loading_accounts:
             self._stop_loading_anim()
-        try:
-            idx = next(i for i, acc in enumerate(self.accounts) if acc.address == address)
-        except StopIteration:
+        idx = self._account_index_by_address(address)
+        if idx is None:
             return
         self._render_account_row(idx, loading=False)
 
     def _refresh_account_row(self, address: str) -> None:
-        try:
-            idx = next(i for i, acc in enumerate(self.accounts) if acc.address == address)
-        except StopIteration:
+        idx = self._account_index_by_address(address)
+        if idx is None:
             return
         loading = address in self._loading_accounts
         self._render_account_row(idx, loading=loading, loading_suffix=self._current_loading_suffix())
 
     def _current_loading_suffix(self) -> str:
-        return self._shimmer_text("Loading...", self._loading_anim_i, span=2)
+        return shimmer_text("Loading...", self._loading_anim_i, span=2)
 
     def _start_loading_anim(self) -> None:
         if self._loading_anim_timer is None:
@@ -10278,7 +11034,7 @@ class WalletApp(App):
                 staking_bal,
                 baker_info,
             )
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             self._ui(self._apply_selected_status_error, address, str(e))
 
     def _apply_selected_status(
@@ -10359,7 +11115,7 @@ class WalletApp(App):
                 hv.append(ListItem(Label("No transactions yet. Press 's' to send or 'x' to receive.")))
             try:
                 self.query_one("#tx_detail_content", Static).update("No transactions available")
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_error("Failed to update tx detail content", exception=e)
             self._set_pending_blink(False)
             return
@@ -10367,6 +11123,8 @@ class WalletApp(App):
         for idx, it in enumerate(items, start=1):
             line = self._format_history_line(idx, it)
             hv.append(ListItem(Label(line, markup=True)))
+        # Keep shimmer in sync whenever we render a list that includes pending items.
+        self._set_pending_blink(has_pending)
 
         if self._history_notice:
             notice_item = ListItem(Label(self._history_notice, markup=True))
@@ -10381,7 +11139,7 @@ class WalletApp(App):
                     self.query_one("#tx_detail_content", Static).update(
                         f"[b]More on TzKT[/b]\n{tzkt_link}"
                     )
-                except Exception as e:
+                except _UI_QUERY_EXCEPTIONS as e:
                     log_error("Failed to update tzkt link in tx details", exception=e)
         else:
             if (
@@ -10419,16 +11177,15 @@ class WalletApp(App):
                     hv.index = 0
                     self.history_selected_index = 0
                     self._update_tx_details()
-            except Exception as e:
+            except _UI_QUERY_EXCEPTIONS as e:
                 log_error("Failed to select first transaction", exception=e)
         self._set_pending_blink(has_pending)
 
     def _update_history_row_for_pending(self, oph: str, address: str) -> None:
         if not self.selected or self.selected.address != address:
             return
-        try:
-            idx = next(i for i, it in enumerate(self.history_items) if (it.get("hash") or "") == oph)
-        except StopIteration:
+        idx = self._history_index_by_hash(oph)
+        if idx is None:
             return
         with self._pending_ops_lock:
             pending = self._pending_ops.get(oph)
@@ -10442,10 +11199,11 @@ class WalletApp(App):
                 return
             label = rows[idx].query_one(Label)
             label.update(self._format_history_line(idx + 1, self.history_items[idx]))
-        except Exception as e:
+        except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update pending history row", exception=e)
         has_pending = any((it.get("status") or "").upper() in ("PENDING", "PROCESSING") for it in self.history_items)
         self._set_pending_blink(has_pending)
+        self._cache_visible_history_for_address(address)
 
     def _format_history_line(self, idx: int, it: dict) -> str:
         ts_raw = it.get("ts") or ""
@@ -10468,12 +11226,16 @@ class WalletApp(App):
             amt_str = f"[yellow]{f'---':<15}[/yellow]"
         elif direction == "UND":
             amt_str = f"[yellow]{f'---':<15}[/yellow]"
+        elif direction == "BAK":
+            amt_str = f"[yellow]{f'---':<15}[/yellow]"
         else:
             amt_str = f"{f'{amt_formatted} XTZ':<15}"
 
         kind = (it.get("kind") or "").lower()
         entrypoint = (it.get("entrypoint") or "").lower()
-        if kind == "delegation":
+        if entrypoint == "change_baker":
+            type_raw = "CH"
+        elif kind == "delegation":
             type_raw = "DLG"
         elif entrypoint == "stake":
             type_raw = "STK"
@@ -10482,7 +11244,7 @@ class WalletApp(App):
         else:
             type_raw = "TX"
 
-        if type_raw == "DLG":
+        if type_raw in ("DLG", "CH"):
             type_text = f"[yellow]{type_raw:<4}[/yellow]"
         elif type_raw in ("STK", "USTK"):
             type_text = f"[#8b5cf6]{type_raw:<4}[/#8b5cf6]"
@@ -10497,9 +11259,22 @@ class WalletApp(App):
         ts_padded = f"{ts:<12}"
         status = (it.get("status") or "CONFIRMED").upper()
         if status == "PROCESSING":
-            status_label = "BAKING TX"
+            if entrypoint == "change_baker":
+                status_label = "CHANGING BAKER"
+            elif direction in ("DEL", "UND"):
+                status_label = "DELEGATING"
+            elif direction == "UST":
+                status_label = "UNSTAKING"
+            elif direction == "STK":
+                status_label = "STAKING"
+            elif direction == "OUT":
+                status_label = "SENDING"
+            else:
+                status_label = "BAKING TX"
         elif status == "PENDING":
-            if direction in ("DEL", "UND"):
+            if entrypoint == "change_baker":
+                status_label = "CHANGING BAKER"
+            elif direction in ("DEL", "UND"):
                 status_label = "DELEGATING"
             elif direction == "UST":
                 status_label = "UNSTAKING"
@@ -10512,7 +11287,9 @@ class WalletApp(App):
         elif status == "FAILED":
             status_label = "FAIL"
         else:
-            if direction in ("DEL", "UND"):
+            if entrypoint == "change_baker":
+                status_label = "BAKER CHANGED"
+            elif direction in ("DEL", "UND"):
                 status_label = "DELEGATED"
             elif direction == "UST":
                 status_label = "UNSTAKED"
@@ -10539,7 +11316,7 @@ class WalletApp(App):
             status_color = "green"
 
         if status in ("PENDING", "PROCESSING"):
-            shimmer = self._shimmer_text(status_label, self._pending_shimmer_i, span=2, pingpong=True)
+            shimmer = shimmer_text(status_label, self._pending_shimmer_i, span=2, pingpong=True)
             status_text = f"{shimmer}{' ' * max(0, 10 - len(status_label))}"
         else:
             status_text = f"[{status_color}]{status_label:<10}[/{status_color}]"
@@ -10549,6 +11326,13 @@ class WalletApp(App):
 
     def _history_cache_key(self, address: str) -> tuple[str, int]:
         return (address, self.history_limit)
+
+    def _cache_visible_history_for_address(self, address: str) -> None:
+        """Persist currently visible history for the selected address into cache."""
+        if not address or self._history_loaded_addr != address:
+            return
+        with self._history_cache_lock:
+            self.history_cache[self._history_cache_key(address)] = list(self.history_items)
 
     def _invalidate_history_cache(self, address: str | None = None) -> None:
         with self._history_cache_lock:
@@ -10588,6 +11372,102 @@ class WalletApp(App):
 
         self._load_history(addr, self.history_limit, quiet=quiet)
 
+    def _apply_loaded_history_if_selected(
+        self,
+        address: str,
+        items: list[dict],
+        *,
+        quiet: bool,
+    ) -> None:
+        """Apply loaded history only when the same wallet is still selected."""
+        selected = self._get_selected()
+        if not selected or selected.address != address:
+            self._clear_account_loading(address)
+            return
+        self._render_history(items)
+        self._set_history_loaded_addr(address)
+        if not quiet:
+            if self._history_requested_more:
+                self._set_status_styled_locked(
+                    "🥖 10 more baguettes ready to eat!",
+                    "success",
+                )
+            else:
+                self._set_status(get_message("refresh_success"))
+        self._clear_account_loading(address)
+
+    def _apply_history_load_error_if_selected(self, address: str, err: str, *, quiet: bool) -> None:
+        """Show history-load errors only for the currently selected wallet."""
+        selected = self._get_selected()
+        if selected and selected.address == address:
+            self._render_history([])
+            if not quiet:
+                self._set_status(f"❌ Display shelf check failed: {err}")
+        self._clear_account_loading(address)
+
+    def _prime_history_for_address(self, address: str) -> None:
+        """Render cached history immediately to avoid a blank list during send."""
+        if not address:
+            return
+        key = self._history_cache_key(address)
+        cached_items = None
+        with self._history_cache_lock:
+            cached_items = self.history_cache.get(key)
+        if cached_items is not None:
+            merged_items = self._merge_history_with_pending(cached_items, address, resolve_pending=False)
+            merged_items = merged_items[: self.history_limit]
+            self._render_history(merged_items)
+            self._set_history_loaded_addr(address)
+            return
+        if self._history_loaded_addr != address:
+            self._render_history([])
+
+    def _focus_history_on_address(
+        self,
+        address: str,
+        *,
+        ensure_loaded: bool = True,
+        refresh_details: bool = True,
+    ) -> None:
+        """Select a wallet and show its history immediately (Send-like UX)."""
+        if not address:
+            return
+        idx = self._account_index_by_address(address)
+        if idx is None:
+            return
+        try:
+            if self._last_selected_addr != address:
+                # Switch context without forcing an immediate full refresh.
+                self._apply_account_selection(
+                    idx,
+                    refresh_details=refresh_details,
+                    refresh_history=False,
+                )
+            self._prime_history_for_address(address)
+            if ensure_loaded and (self._history_loaded_addr != address or not self.history_items):
+                self._load_history_for_selected(force=True, quiet=True)
+        except _UI_QUERY_EXCEPTIONS as e:
+            # Never block operation dispatch if UI selection/focus glitches transiently.
+            log_warning("Failed to focus history on source wallet", exception=e, address=address)
+
+    def _prefetch_history_for_address(self, address: str) -> None:
+        def _worker() -> None:
+            try:
+                items = get_xtz_history(self.rpc, address, limit=self.history_limit)
+                items = self._merge_history_with_pending(items, address, resolve_pending=True)
+                items = items[: self.history_limit]
+                with self._history_cache_lock:
+                    self.history_cache[(address, self.history_limit)] = items
+                selected = self._get_selected()
+                if not selected or selected.address != address:
+                    return
+                self._ui(self._render_history, items)
+                self._ui(self._set_history_loaded_addr, address)
+                self._ui(self._clear_account_loading, address)
+            except _FLOW_PRECHECK_EXCEPTIONS as e:
+                log_warning("Failed to prefetch history", exception=e, address=address)
+        self.run_worker(_worker, exclusive=False, thread=True)
+
     @work(exclusive=True, thread=True)
     def _load_history(self, address: str, limit: int, *, quiet: bool = False) -> None:
         logging.info(f"Loading history for {address} (limit: {limit})")
@@ -10607,24 +11487,10 @@ class WalletApp(App):
                     "[dim]🥐 What else you want from me, baguettes? "
                     "For more txs, head to tzkt.io.[/dim]"
                 )
-            self._ui(self._render_history, items)
-            self._ui(self._set_history_loaded_addr, address)
-            if not quiet:
-                if self._history_requested_more:
-                    self._ui(
-                        self._set_status_styled_locked,
-                        "🥖 10 more baguettes ready to eat!",
-                        "success",
-                    )
-                else:
-                    self._ui(self._set_status, get_message("refresh_success"))
-            self._ui(self._clear_account_loading, address)
-        except Exception as e:
+            self._ui(self._apply_loaded_history_if_selected, address, items, quiet=quiet)
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
             log_error("Failed to load history", exception=e, address=address, limit=limit)
-            self._ui(self._render_history, [])
-            if not quiet:
-                self._ui(self._set_status, f"❌ Display shelf check failed: {e}")
-            self._ui(self._clear_account_loading, address)
+            self._ui(self._apply_history_load_error_if_selected, address, str(e), quiet=quiet)
         finally:
             self._ui(self._set_history_requested_more, False)
             if not quiet:
@@ -10643,6 +11509,9 @@ class WalletApp(App):
             item.setdefault("status", "CONFIRMED")
             h = item.get("hash") or ""
             if h:
+                override = self._op_entrypoint_overrides.get(h)
+                if override:
+                    item["entrypoint"] = override
                 seen_hashes.add(h)
             merged.append(item)
 
@@ -10683,11 +11552,19 @@ class WalletApp(App):
                             pending_changed = True
                             resolved_items.append(resolved)
                             continue
-                    except Exception as e:
+                    except _FLOW_PRECHECK_EXCEPTIONS as e:
                         log_debug("Failed to resolve pending tx by hash", exception=str(e), oph=oph, address=address)
                 merged.append(dict(pending))
 
         merged.extend(resolved_items)
+        # Apply entrypoint overrides to resolved items too (e.g. change_baker).
+        for it in merged:
+            h = it.get("hash") or ""
+            if not h:
+                continue
+            override = self._op_entrypoint_overrides.get(h)
+            if override:
+                it["entrypoint"] = override
         merged.sort(key=lambda x: x.get("ts") or "", reverse=True)
         if pending_changed:
             self._persist_pending_ops()
@@ -10705,19 +11582,19 @@ class WalletApp(App):
         if isinstance(amt, str):
             try:
                 coerced["amount_xtz"] = Decimal(amt)
-            except Exception as e:
+            except _NUMERIC_PARSE_EXCEPTIONS as e:
                 log_debug("Failed to coerce pending amount", exception=str(e), amount=amt)
         proc = coerced.get("processing_until")
         if isinstance(proc, str):
             try:
                 coerced["processing_until"] = float(proc)
-            except Exception as e:
+            except _NUMERIC_PARSE_EXCEPTIONS as e:
                 log_debug("Failed to coerce pending processing_until", exception=str(e), processing_until=proc)
         force_until = coerced.get("force_pending_until")
         if isinstance(force_until, str):
             try:
                 coerced["force_pending_until"] = float(force_until)
-            except Exception as e:
+            except _NUMERIC_PARSE_EXCEPTIONS as e:
                 log_debug("Failed to coerce pending force_until", exception=str(e), force_until=force_until)
         return coerced
 
@@ -10732,6 +11609,25 @@ class WalletApp(App):
                 serialized.append(out)
             self.store["pending_ops"] = serialized
             save_store(self.store)
+
+    def _persist_op_entrypoint_overrides(self) -> None:
+        with self._store_lock:
+            self.store["op_entrypoint_overrides"] = dict(self._op_entrypoint_overrides)
+            save_store(self.store)
+
+    def _set_op_entrypoint_override(self, oph: str, entrypoint: str) -> None:
+        oph = (oph or "").strip()
+        entrypoint = (entrypoint or "").strip()
+        if not oph or not entrypoint:
+            return
+        # Keep a small bounded set to avoid unbounded growth.
+        self._op_entrypoint_overrides[oph] = entrypoint
+        while len(self._op_entrypoint_overrides) > 500:
+            oldest_key = next(iter(self._op_entrypoint_overrides), None)
+            if oldest_key is None:
+                break
+            self._op_entrypoint_overrides.pop(oldest_key, None)
+        self._persist_op_entrypoint_overrides()
 
     def _format_baker_label(self, baker_addr: Optional[str]) -> str:
         if not baker_addr:
@@ -10759,12 +11655,12 @@ class WalletApp(App):
             baker_addr = None
             try:
                 baker_addr = find_baker_for_operation(rpc, oph)
-            except Exception as e:
+            except _FLOW_PRECHECK_EXCEPTIONS as e:
                 log_warning("Failed to resolve baker for op", exception=e, oph=oph)
             if baker_addr:
                 try:
                     label = self._format_baker_label(baker_addr)
-                except Exception as e:
+                except _FLOW_PRECHECK_EXCEPTIONS as e:
                     log_warning("Failed to format baker label", exception=e, baker_addr=baker_addr)
                     label = baker_addr
                 label = self._shorten_baker_label(label)
@@ -10787,9 +11683,8 @@ class WalletApp(App):
         entrypoint: str = "",
         history_delay_seconds: float | None = None,
         processing_seconds: float | None = None,
+        select_wallet: bool = True,
     ) -> None:
-        from datetime import datetime, timezone
-
         history_delay = 0.0
         if history_delay_seconds is not None and history_delay_seconds > 0:
             history_delay = float(history_delay_seconds)
@@ -10818,14 +11713,33 @@ class WalletApp(App):
             self._pending_ops[oph] = item
         self._persist_pending_ops()
 
+        if entrypoint:
+            self._set_op_entrypoint_override(oph, entrypoint)
+
         # Ensure source wallet is selected so pending row is visible immediately.
-        if not self.selected or self.selected.address != address:
+        if select_wallet and (not self.selected or self.selected.address != address):
             self._select_account_by_address(address)
 
         if self.selected and self.selected.address == address:
-            merged_items = self._merge_history_with_pending(self.history_items, address, resolve_pending=False)
+            # Avoid cross-wallet history bleed: right after selection switches,
+            # self.history_items may still belong to the previously selected wallet.
+            if self._history_loaded_addr == address:
+                base_items = self.history_items
+            else:
+                with self._history_cache_lock:
+                    base_items = list(self.history_cache.get(self._history_cache_key(address), []))
+            merged_items = self._merge_history_with_pending(base_items, address, resolve_pending=False)
             merged_items = merged_items[: self.history_limit]
             self._render_history(merged_items)
+            self._set_history_loaded_addr(address)
+            self._cache_visible_history_for_address(address)
+            # Start shimmer immediately (not only after the first timer tick), so the
+            # "processing" feel is synced with the status bar breathing.
+            has_pending = any(
+                (it.get("status") or "").upper() in ("PENDING", "PROCESSING")
+                for it in self.history_items
+            )
+            self._set_pending_blink(has_pending)
 
         # UX: assume OK after a short delay, then verify quietly in background
         try:
@@ -10843,7 +11757,7 @@ class WalletApp(App):
                 max(Config.PENDING_TX_VERIFY_SECONDS, processing_total),
                 lambda: self._verify_pending_op(oph, address),
             )
-        except Exception as e:
+        except _UI_CALLBACK_EXCEPTIONS as e:
             log_error("Failed to schedule pending op checks", exception=e)
 
         # Skip full history refresh here; pending rows update in-place for smoother UX.
@@ -10880,12 +11794,10 @@ class WalletApp(App):
         )
 
     def _verify_pending_op_worker(self, oph: str, address: str) -> None:
-        from sassy_wallet.core.tezos import resolve_tx_by_hash
-
         confirmed = False
         try:
-            confirmed = bool(resolve_tx_by_hash(self.rpc, oph, address))
-        except Exception as e:
+            confirmed = bool(resolve_tx_by_hash(self.rpc, address, oph))
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
             log_error("Pending op verify failed", exception=e)
 
         self._ui(self._apply_pending_verification, oph, address, confirmed)
@@ -10948,11 +11860,9 @@ class WalletApp(App):
             self._set_status("🥖 Nothing to refresh — no bread, no pizza, nada. ¬_¬")
             return
         if self.selected:
-            try:
-                idx = next(i for i, acc in enumerate(self.accounts) if acc.address == self.selected.address)
+            idx = self._account_index_by_address(self.selected.address)
+            if idx is not None:
                 self._show_account_loading(idx)
-            except StopIteration:
-                pass
             self._invalidate_balance_cache(self.selected.address)
         self._update_status_balance()
         if self.selected:
@@ -10978,7 +11888,8 @@ class WalletApp(App):
         if address and self.selected.address != address:
             return
         self._invalidate_balance_cache(self.selected.address)
-        self._update_status_balance()
+        # Keep current details visible while we refresh to avoid flicker.
+        self._fetch_selected_status(self.selected.address)
 
     def _silent_refresh_history_for(self, address: str) -> None:
         """Silently refresh history for an address if it's still selected."""
@@ -11114,7 +12025,7 @@ class WalletApp(App):
         self.history_limit = Config.HISTORY_DEFAULT_LIMIT
         self._update_history_title()
 
-        import random
+        import secrets
 
         if choice == "ghostnet":
             net_msgs = [
@@ -11138,7 +12049,7 @@ class WalletApp(App):
 
         self.query_one("#wallet_balance", Static).update(msg)
         self._status_lock_until_refresh = False
-        self._set_status_styled_locked(random.choice(net_msgs), style="info")
+        self._set_status_styled_locked(secrets.choice(net_msgs), style="info")
         if self.selected:
             self._update_status_balance()
             self._load_history_for_selected(force=True, quiet=True)
@@ -11149,6 +12060,13 @@ class WalletApp(App):
         old_rpc = self.rpc
         choice = await self.push_screen_wait(RpcPickerScreen(current_rpc=self.rpc))
         if not choice or choice == old_rpc:
+            return
+
+        try:
+            choice = normalize_rpc_url(choice)
+        except ValueError as e:
+            log_warning("Rejected invalid RPC selection", rpc=choice, reason=str(e))
+            self._set_status_styled("❌ Invalid RPC URL. HTTPS endpoint required.", style="error", duration=6.0)
             return
 
         self.rpc = choice
@@ -11162,7 +12080,7 @@ class WalletApp(App):
 
         can_send = rpc_supports_send(self.rpc)
         can_sim = rpc_supports_simulation(self.rpc)
-        import random
+        import secrets
 
         if can_send and can_sim:
             msg = f"RPC set: {self.rpc} (send + simulate)"
@@ -11182,7 +12100,7 @@ class WalletApp(App):
             f"🥐 Pastries queued — connected to {short_rpc}",
         ]
         self._status_lock_until_refresh = False
-        self._set_status_styled_locked(random.choice(oven_msgs), style="info")
+        self._set_status_styled_locked(secrets.choice(oven_msgs), style="info")
         if self.selected:
             self._update_status_balance()
             self._load_history_for_selected(force=True, quiet=True)
@@ -11198,7 +12116,7 @@ class WalletApp(App):
     @work(exclusive=True)
     async def action_quit(self) -> None:
         self._status_lock_until_refresh = False
-        import random
+        import secrets
 
         exit_lines = [
             "🥐 Croissants are almost ready. Are you sure you want to leave?",
@@ -11214,7 +12132,7 @@ class WalletApp(App):
             "🥖 Starter is alive. Leaving now feels wrong, no?",
             "🥐 The croissants just fluffed. Your call.",
         ]
-        line = random.choice(exit_lines)
+        line = secrets.choice(exit_lines)
         message = f"[b #f59e0b]{line}[/b #f59e0b]\n\nAre you sure you want to exit?"
         confirmed = await self.push_screen_wait(
             ExitConfirmScreen(
@@ -11227,11 +12145,41 @@ class WalletApp(App):
         if confirmed:
             self.exit()
 
-    @work(exclusive=True)
-    async def action_stake(self) -> None:
+    def action_stake(self) -> None:
         """Open stake/delegation modal and handle the returned action."""
+        log_info(
+            "action_stake requested",
+            in_progress=self._stake_flow_in_progress,
+            breathing=self._breathing_active,
+            watchdog_active=bool(self._tx_watchdog_token),
+            status_locked=self._status_lock_until_refresh,
+        )
+        if self._breathing_active or self._tx_watchdog_token is not None:
+            self._set_status("⏳ Operation in progress - wait for current flow to finish.", force=True)
+            return
+        # A locked status line from a completed flow should not block entering Stake HQ.
+        if self._status_lock_until_refresh:
+            self._status_lock_until_refresh = False
+        if self._stake_flow_in_progress:
+            return
+        self._stake_flow_in_progress = True
         self._status_lock_until_refresh = False
-        await self._open_stake_flow()
+
+        try:
+            self.run_worker(self._run_stake_flow, exclusive=False, thread=False)
+        except _UI_CALLBACK_EXCEPTIONS as e:
+            self._stake_flow_in_progress = False
+            log_error("Failed to start stake flow worker", exception=e)
+            self._set_status_styled("❌ Failed to start stake flow", style="error", duration=6.0)
+
+    async def _run_stake_flow(self) -> None:
+        try:
+            await self._open_stake_flow()
+        except asyncio.CancelledError:
+            log_warning("action_stake cancelled")
+        finally:
+            log_info("action_stake finished")
+            self._stake_flow_in_progress = False
 
     async def _open_stake_flow(self, ctx: Optional[dict] = None) -> None:
         """Open stake modal with optional context and handle the returned action."""
@@ -11255,6 +12203,16 @@ class WalletApp(App):
                 initial_ctx=ctx,
             )
         )
+        if stake_data:
+            log_info(
+                "Stake flow modal dismissed with payload",
+                action=stake_data.get("action"),
+                has_account=bool(stake_data.get("account")),
+                has_key=bool(stake_data.get("key")),
+                has_amount=("amount" in stake_data),
+            )
+        else:
+            log_info("Stake flow modal dismissed without payload")
 
         # If user cancelled or closed modal, stake_data will be None
         if not stake_data:
@@ -11262,6 +12220,22 @@ class WalletApp(App):
 
         # Handle the action based on what was returned
         action = stake_data.get("action")
+        account = stake_data.get("account")
+
+        # Anchor main view to the source wallet immediately after StakeScreen closes.
+        if account is not None:
+            try:
+                self._focus_history_on_address(
+                    getattr(account, "address", ""),
+                    ensure_loaded=True,
+                    refresh_details=True,
+                )
+            except _UI_CALLBACK_EXCEPTIONS as e:
+                log_warning(
+                    "Failed to anchor source wallet after StakeScreen close",
+                    exception=e,
+                    address=getattr(account, "address", ""),
+                )
 
         if action == "stake":
             await self._handle_stake_action(stake_data)
@@ -11269,6 +12243,8 @@ class WalletApp(App):
             await self._handle_unstake_action(stake_data)
         elif action == "delegate":
             await self._handle_delegate_action(stake_data)
+        elif action == "change_baker":
+            await self._handle_change_baker_action(stake_data)
 
     async def _handle_stake_action(self, stake_data: dict) -> None:
         """
@@ -11277,10 +12253,6 @@ class WalletApp(App):
         2. Estimate gas and show confirmation screen
         3. Execute stake operation
         """
-        import traceback
-        from sassy_wallet.core.tezos import stake_xtz, key_from_encoded_secret
-        from sassy_wallet.core.crypto import decrypt_secret
-
         account = stake_data.get("account")
         amount = stake_data.get("amount")
 
@@ -11288,135 +12260,225 @@ class WalletApp(App):
             log_error("Invalid stake data received", stake_data=stake_data)
             self._set_status("❌ Invalid stake data")
             return
+        log_info(
+            "Handling stake action",
+            address=getattr(account, "address", ""),
+            has_key=bool(stake_data.get("key")),
+            amount=str(amount),
+        )
 
-
+        breathing_started = False
+        watchdog_token = None
         try:
             confirm_result = None
-            key = None
-            error_note = ""
+            key = stake_data.get("key")
+            fee_mutez = stake_data.get("fee_mutez")
+            gas_limit = stake_data.get("gas_limit")
+            storage_limit = stake_data.get("storage_limit")
 
-            while True:
-                passphrase = await self.push_screen_wait(
-                    StakePassphraseScreen(
-                        "🔐 Enter Your Passphrase",
-                        password=True,
-                        placeholder="Your wallet passphrase",
-                        wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
-                        ok_label="Next →",
-                        fun_note="Keep your keys safe. Never share this passphrase. 🔐🥖",
-                        show_back_button=True,
-                        error_note=error_note,
+            if key is None:
+                error_note = ""
+                while True:
+                    passphrase = await self.push_screen_wait(
+                        StakePassphraseScreen(
+                            "Enter Your Encryption Password",
+                            password=True,
+                            placeholder="Your wallet encryption password",
+                            wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
+                            ok_label="Next →",
+                            fun_note="Keep your keys safe. Never share this passphrase. 🔐🥖",
+                            show_back_button=True,
+                            error_note=error_note,
+                        )
                     )
-                )
 
-                if passphrase == "__BACK__":
-                    await self._open_stake_flow(
-                        {"account": account, "amount": amount, "action": "stake"}
-                    )
-                    return
+                    if passphrase == BACK_NAV_MARKER:
+                        self._set_status("⏸️ Staking cancelled")
+                        return
 
-                if not passphrase:
-                    self._set_status("👀 Chad mode has to wait — staking canceled.")
-                    return
+                    if not passphrase:
+                        self._set_status("👀 Chad mode has to wait — staking canceled.")
+                        return
 
-                _, can_send, _, can_stake = self._ensure_working_rpc_for_stake(account.address)
-                if not can_send:
-                    self._set_status("[red]❌ No RPC available to inject operations[/red]")
-                    return
-                if not can_stake:
-                    self._set_status("[red]❌ RPC/protocol does not support stake operations[/red]")
-                    return
+                    _, can_send, _ = self._ensure_working_rpc()
+                    if not can_send:
+                        log_warning(
+                            "Stake RPC precheck reports no injection support; attempting anyway",
+                            address=account.address,
+                            rpc=self.rpc,
+                        )
 
-                try:
-                    secret_key = decrypt_secret(account.enc, passphrase)
-                except Exception as decrypt_err:
-                    from cryptography.exceptions import InvalidTag
-
-                    if isinstance(decrypt_err, InvalidTag):
+                    try:
+                        secret_key = decrypt_secret(account.enc, passphrase)
+                    except InvalidTag:
                         error_note = "❌ Wrong passphrase. Try again."
                         continue
-                    raise
-                key = key_from_encoded_secret(secret_key)
+                    except (ValueError, TypeError) as decrypt_err:
+                        raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
+                    key = key_from_encoded_secret(secret_key)
 
+                    key_pkh = key.public_key_hash()
+                    if account.address != key_pkh:
+                        self._set_status("❌ KEY MISMATCH! Wallet address doesn't match decrypted key")
+                        return
+
+                    # Preflight: refresh delegation state (best-effort).
+                    # Do NOT block if indexer lags; allow chain to validate.
+                    try:
+                        state = await asyncio.to_thread(
+                            get_wallet_chain_state,
+                            self.rpc,
+                            account.address,
+                            force_refresh=True,
+                            prefer_rpc=True,
+                        )
+                        if not state.get("delegate"):
+                            log_warning(
+                                "Delegation not indexed yet; proceeding with stake",
+                                address=account.address,
+                            )
+                    except _FLOW_PRECHECK_EXCEPTIONS as e:
+                        log_warning("Failed to preflight wallet delegation state", exception=e, address=account.address)
+
+                    confirm_result = await self.push_screen_wait(
+                        ConfirmStakeScreen(
+                            rpc=self.rpc,
+                            key=key,
+                            address=account.address,
+                            amount=amount,
+                            show_back_button=True
+                        )
+                    )
+
+                    if confirm_result and confirm_result.get(BACK_NAV_MARKER):
+                        continue
+                    if not confirm_result or not confirm_result.get("ok"):
+                        self._set_status("👀 Chad mode has to wait — staking canceled.")
+                        return
+
+                    fee_mutez = confirm_result.get("fee_mutez")
+                    gas_limit = confirm_result.get("gas_limit")
+                    storage_limit = confirm_result.get("storage_limit")
+                    break
+            else:
                 key_pkh = key.public_key_hash()
                 if account.address != key_pkh:
+                    log_warning(
+                        "Stake key mismatch in app handler",
+                        expected=account.address,
+                        got=key_pkh,
+                    )
                     self._set_status("❌ KEY MISMATCH! Wallet address doesn't match decrypted key")
                     return
-
-                confirm_result = await self.push_screen_wait(
-                    ConfirmStakeScreen(
-                        rpc=self.rpc,
-                        key=key,
+                _, can_send, _ = self._ensure_working_rpc()
+                if not can_send:
+                    log_warning(
+                        "Stake RPC precheck reports no injection support; attempting anyway",
                         address=account.address,
-                        amount=amount,
-                        show_back_button=True
+                        rpc=self.rpc,
                     )
-                )
-
-                if confirm_result and confirm_result.get("__BACK__"):
-                    continue
-                if not confirm_result or not confirm_result.get("ok"):
-                    self._set_status("👀 Chad mode has to wait — staking canceled.")
-                    return
-
-                break
+                # Skip preflight when key/fees were already confirmed in StakeScreen
+                # to avoid reopening the stake modal due to indexer lag.
 
             # Step 3: Execute staking operation with confirmed parameters
-            fee_mutez = confirm_result.get("fee_mutez")
-            gas_limit = confirm_result.get("gas_limit")
-            storage_limit = confirm_result.get("storage_limit")
 
-            # Ensure source wallet is selected so history updates match the action
-            try:
-                idx = next(i for i, acc in enumerate(self.accounts) if acc.address == account.address)
-                if self._last_selected_addr != account.address:
-                    self._ui(self._apply_account_selection, idx)
-            except StopIteration:
-                pass
+            # Ensure the source wallet is selected and its history is visible immediately.
+            self._focus_history_on_address(account.address, ensure_loaded=True)
 
             pre_staked_mutez = None
             try:
-                pre_staked_mutez = get_staking_balance(self.rpc, account.address)
-            except Exception as e:
+                pre_staked_mutez = await asyncio.to_thread(get_staking_balance, self.rpc, account.address)
+            except _FLOW_PRECHECK_EXCEPTIONS as e:
                 log_warning("Failed to fetch staked balance before staking", exception=e, address=account.address)
 
             flow_start = time.time()
-            self._start_breathing_effect(
+            self._ui(
+                self._start_breathing_effect,
                 "⏳ Staking... This may take a moment...",
                 bright_class="status-stake",
                 dim_class="status-stake-dim",
             )
+            self._ui(self._set_busy, True)
+            # Ensure the UI renders the new classes before we start awaiting work.
+            await asyncio.sleep(0)
+            breathing_started = True
+            watchdog_token = self._ui(self._start_tx_watchdog, "stake", account.address)
 
-            _, op_hash = self._with_rpc_fallback(
-                action="stake",
-                rpc=self.rpc,
-                source_address=account.address,
-                require_stake_support=True,
-                fn=lambda r: stake_xtz(
-                    r,
-                    key,
-                    amount,
-                    fee_mutez=fee_mutez,
-                    gas_limit=gas_limit,
-                    storage_limit=storage_limit,
-                ),
-            )
-
-            remaining = self._tx_flow_remaining(flow_start)
-            if remaining <= 0.1:
-                remaining = Config.TX_FLOW_TOTAL_SECONDS
-            if remaining <= 0.1:
-                remaining = Config.TX_FLOW_TOTAL_SECONDS
-            baker_addr = None
-            baker_label = "The baker"
             try:
-                baker_addr = get_delegation_info(self.rpc, account.address)
-                if baker_addr:
-                    baker_label = self._format_baker_label(baker_addr)
-                    baker_label = self._shorten_baker_label(baker_label)
-            except Exception as e:
-                log_warning("Failed to resolve delegate baker for stake", exception=e, address=account.address)
-            self._add_pending_tx(
+                handled = {"done": False}
+                wd_token = watchdog_token
+                tx_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._with_rpc_fallback,
+                        action="stake",
+                        rpc=self.rpc,
+                        source_address=account.address,
+                        require_stake_support=True,
+                        fn=lambda r: stake_xtz(
+                            r,
+                            key,
+                            amount,
+                            fee_mutez=fee_mutez,
+                            gas_limit=gas_limit,
+                            storage_limit=storage_limit,
+                        ),
+                    )
+                )
+
+                def _late_done(task: "asyncio.Task") -> None:
+                    # If the action timed out at the UI layer, still try to surface
+                    # the injected op in history when we eventually get the hash.
+                    if handled["done"]:
+                        return
+                    if wd_token is not None and self._tx_watchdog_token == wd_token:
+                        # Still within the "normal" flow; main path will handle UI.
+                        return
+                    try:
+                        _, late_oph = task.result()
+                    except _FLOW_TASK_EXCEPTIONS as e:
+                        log_warning("Stake task failed after UI timeout", exception=e, address=account.address)
+                        return
+                    try:
+                        self._add_pending_tx(
+                            address=account.address,
+                            oph=late_oph,
+                            direction="STK",
+                            amount_xtz=amount,
+                            counterparty="The baker",
+                            kind="transaction",
+                            entrypoint="stake",
+                            history_delay_seconds=Config.TX_FLOW_TOTAL_SECONDS,
+                            processing_seconds=Config.TX_FLOW_TOTAL_SECONDS,
+                            select_wallet=False,
+                        )
+                        self._schedule_after(60.0, lambda: self._silent_refresh_history_for(account.address))
+                    except _UI_CALLBACK_EXCEPTIONS as e:
+                        log_warning("Failed to apply late stake UI update", exception=e, address=account.address)
+
+                tx_task.add_done_callback(lambda t: self._ui(_late_done, t))
+
+                _, op_hash = await asyncio.wait_for(
+                    asyncio.shield(tx_task),
+                    timeout=Config.TX_RPC_HARD_TIMEOUT_SECONDS,
+                )
+                handled["done"] = True
+                log_info("Stake operation injected", address=account.address, op_hash=op_hash)
+            except asyncio.TimeoutError:
+                if watchdog_token is not None:
+                    self._ui(self._tx_watchdog_fire, watchdog_token, "stake", account.address)
+                self._ui(self._stop_breathing_effect)
+                self._ui(self._set_busy, False)
+                log_warning("Stake operation timed out waiting for injection", address=account.address)
+                return
+            finally:
+                if watchdog_token is not None:
+                    self._ui(self._stop_tx_watchdog, watchdog_token)
+                    watchdog_token = None
+
+            remaining = self._tx_flow_remaining_or_default(flow_start)
+            baker_label = "The baker"
+            self._ui(
+                self._add_pending_tx,
                 address=account.address,
                 oph=op_hash,
                 direction="STK",
@@ -11424,16 +12486,20 @@ class WalletApp(App):
                 counterparty=baker_label,
                 kind="transaction",
                 entrypoint="stake",
-                history_delay_seconds=remaining,
+                history_delay_seconds=0.0,
+                processing_seconds=remaining,
+            )
+            # Resolve the actual baker address without blocking the UI.
+            self.run_worker(
+                lambda oph=op_hash, addr=account.address: self._resolve_delegate_for_pending(oph, addr),
+                exclusive=False,
+                thread=True,
             )
 
-            # Show success with a short bake-out blink
-            self._status_lock_until_refresh = True
-            self._start_breathing_effect(
-                "🥐 Finishing the bake...",
-                bright_class="status-stake",
-                dim_class="status-stake-dim",
-            )
+            self._ui(setattr, self, "_status_lock_until_refresh", True)
+            # Keep breathing until the pending row resolves (synced with shimmer),
+            # then stop breathing in the finalizer.
+            self._ui(self._set_status, "⏳ Staking submitted - waiting for inclusion...", force=True)
             is_first_stake = pre_staked_mutez is not None and pre_staked_mutez <= 0
             baked_by_box = {"label": None}
             if not is_first_stake:
@@ -11447,6 +12513,7 @@ class WalletApp(App):
 
             def _finish_stake_status() -> None:
                 self._stop_breathing_effect()
+                self._set_busy(False)
                 if is_first_stake:
                     label = baker_label
                     if label and label not in ("?", "The baker"):
@@ -11464,18 +12531,40 @@ class WalletApp(App):
                     force=True,
                 )
 
-            self.set_timer(remaining, _finish_stake_status)
-            self._schedule_after(remaining, lambda: self._refresh_account_status_only(account.address))
-            self._schedule_after(remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
+            # Slight delay so the history row can flip from PROCESSING -> STAKED first.
+            self._ui(self.set_timer, remaining + 0.05, _finish_stake_status)
+            # Safety net: if finalize callback is skipped, do not leave breathing forever.
+            self._ui(self._schedule_after, remaining + 5.0, lambda: self._tx_finalize_failsafe("stake", account.address))
+            self._ui(self._schedule_after, remaining, lambda: self._refresh_account_status_only(account.address))
+            self._ui(self._schedule_after, remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
 
-        except Exception as e:
+        except asyncio.CancelledError:
+            if breathing_started:
+                self._ui(self._stop_breathing_effect)
+                self._ui(self._set_busy, False)
+            if watchdog_token is not None:
+                self._ui(self._stop_tx_watchdog, watchdog_token)
+            raise
+        except _FLOW_TASK_EXCEPTIONS as e:
 
             error_msg = str(e)
             if len(error_msg) > 150:
                 error_msg = error_msg[:150] + "..."
 
-            self._stop_breathing_effect()
-            self._set_status_styled(f"❌ Staking failed: {error_msg}", style="error", duration=6.0)
+            log_error("Staking failed during execution", exception=e, address=getattr(account, "address", ""))
+            self._ui(self._stop_breathing_effect)
+            self._ui(self._set_busy, False)
+            self._ui(self._set_status_styled, f"❌ Staking failed: {error_msg}", style="error", duration=6.0)
+        except Exception as e:
+            log_error("Unhandled staking error", exception=e, address=getattr(account, "address", ""))
+            self._ui(self._stop_breathing_effect)
+            self._ui(self._set_busy, False)
+            self._ui(
+                self._set_status_styled,
+                "❌ Staking failed: unexpected error (check logs).",
+                style="error",
+                duration=6.0,
+            )
 
     async def _handle_unstake_action(self, stake_data: dict) -> None:
         """
@@ -11484,10 +12573,6 @@ class WalletApp(App):
         2. Estimate gas and show confirmation screen
         3. Execute unstake operation
         """
-        import traceback
-        from sassy_wallet.core.tezos import unstake_xtz, key_from_encoded_secret
-        from sassy_wallet.core.crypto import decrypt_secret
-
         account = stake_data.get("account")
         amount = stake_data.get("amount")
 
@@ -11496,136 +12581,219 @@ class WalletApp(App):
             self._set_status("❌ Invalid unstake data")
             return
 
-
+        breathing_started = False
+        watchdog_token = None
         try:
             confirm_result = None
-            key = None
-            error_note = ""
+            key = stake_data.get("key")
+            fee_mutez = stake_data.get("fee_mutez")
+            gas_limit = stake_data.get("gas_limit")
+            storage_limit = stake_data.get("storage_limit")
 
-            while True:
-                passphrase = await self.push_screen_wait(
-                    StakePassphraseScreen(
-                        "🔐 Enter Your Passphrase",
-                        password=True,
-                        placeholder="Your wallet passphrase",
-                        wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
-                        ok_label="Next →",
-                        fun_note="Keep your keys safe. Never share this passphrase. 🔐🥖",
-                        show_back_button=True,
-                        error_note=error_note,
+            if key is None:
+                error_note = ""
+                while True:
+                    passphrase = await self.push_screen_wait(
+                        StakePassphraseScreen(
+                            "Enter Your Encryption Password",
+                            password=True,
+                            placeholder="Your wallet encryption password",
+                            wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
+                            ok_label="Next →",
+                            fun_note="Keep your keys safe. Never share this passphrase. 🔐🥖",
+                            show_back_button=True,
+                            error_note=error_note,
+                        )
                     )
-                )
 
-                if passphrase == "__BACK__":
-                    await self._open_stake_flow(
-                        {"account": account, "amount": amount, "action": "unstake"}
-                    )
-                    return
+                    if passphrase == BACK_NAV_MARKER:
+                        self._set_status("⏸️ Unstaking cancelled")
+                        return
 
-                if not passphrase:
-                    self._set_status("⏸️ Unstaking cancelled")
-                    return
+                    if not passphrase:
+                        self._set_status("⏸️ Unstaking cancelled")
+                        return
 
-                _, can_send, _, can_stake = self._ensure_working_rpc_for_stake(account.address)
-                if not can_send:
-                    self._set_status("[red]❌ No RPC available to inject operations[/red]")
-                    return
-                if not can_stake:
-                    self._set_status("[red]❌ RPC/protocol does not support unstake operations[/red]")
-                    return
+                    _, can_send, _ = self._ensure_working_rpc()
+                    if not can_send:
+                        self._set_status("[red]❌ No RPC available to inject operations[/red]")
+                        return
 
-                try:
-                    secret_key = decrypt_secret(account.enc, passphrase)
-                except Exception as decrypt_err:
-                    from cryptography.exceptions import InvalidTag
-
-                    if isinstance(decrypt_err, InvalidTag):
+                    try:
+                        secret_key = decrypt_secret(account.enc, passphrase)
+                    except InvalidTag:
                         error_note = "❌ Wrong passphrase. Try again."
                         continue
-                    raise
-                key = key_from_encoded_secret(secret_key)
+                    except (ValueError, TypeError) as decrypt_err:
+                        raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
+                    key = key_from_encoded_secret(secret_key)
 
+                    key_pkh = key.public_key_hash()
+                    if account.address != key_pkh:
+                        self._set_status("❌ KEY MISMATCH!")
+                        return
+
+                    # Preflight: refresh staking state (best-effort).
+                    # Do NOT block if indexer lags; allow chain to validate.
+                    try:
+                        state = await asyncio.to_thread(
+                            get_wallet_chain_state,
+                            self.rpc,
+                            account.address,
+                            force_refresh=True,
+                            prefer_rpc=True,
+                        )
+                        staked_mutez = int(state.get("staked_mutez") or 0)
+                        staking_active = bool(state.get("staking_active")) or (staked_mutez > 0)
+                        staked_xtz = mutez_to_xtz(staked_mutez)
+                        if staked_xtz <= 0 and not staking_active:
+                            log_warning(
+                                "Staked balance not indexed yet; proceeding with unstake",
+                                address=account.address,
+                            )
+                        if staked_xtz > 0 and amount > staked_xtz:
+                            log_warning(
+                                "Staked balance changed; proceeding with unstake",
+                                address=account.address,
+                            )
+                    except _FLOW_PRECHECK_EXCEPTIONS as e:
+                        log_warning("Failed to preflight wallet staking state", exception=e, address=account.address)
+
+                    confirm_result = await self.push_screen_wait(
+                        ConfirmUnstakeScreen(
+                            rpc=self.rpc,
+                            key=key,
+                            address=account.address,
+                            amount=amount,
+                            show_back_button=True
+                        )
+                    )
+
+                    if confirm_result and confirm_result.get(BACK_NAV_MARKER):
+                        continue
+                    if not confirm_result or not confirm_result.get("ok"):
+                        self._set_status("↩️ Unstaking cancelled")
+                        return
+
+                    fee_mutez = confirm_result.get("fee_mutez")
+                    gas_limit = confirm_result.get("gas_limit")
+                    storage_limit = confirm_result.get("storage_limit")
+                    break
+            else:
                 key_pkh = key.public_key_hash()
                 if account.address != key_pkh:
                     self._set_status("❌ KEY MISMATCH!")
                     return
+                _, can_send, _ = self._ensure_working_rpc()
+                if not can_send:
+                    self._set_status("[red]❌ No RPC available to inject operations[/red]")
+                    return
+                # Skip preflight when key/fees were already confirmed in StakeScreen
+                # to avoid reopening the stake modal due to indexer lag.
 
-                confirm_result = await self.push_screen_wait(
-                    ConfirmUnstakeScreen(
+            # Extra confirmation to discourage impulsive unstaking (skip if already confirmed in Stake HQ).
+            if not stake_data.get("second_confirmed"):
+                # Small delay avoids auto-accept from the previous button click.
+                await asyncio.sleep(0.05)
+                confirmed = await self.push_screen_wait(
+                    ConfirmScreen(
+                        "Unstaking is reversible, but your future self might judge you.\n\n"
+                        "Still want to proceed?",
+                        title="Second Thoughts",
+                        yes_label="Yes, unstake",
+                        no_label="Keep staking",
+                    )
+                )
+                if not confirmed:
+                    self._set_status("😒 Unstake canceled. Chad mode stays on.")
+                    return
+
+            # Ensure the source wallet is selected and its history is visible immediately.
+            self._focus_history_on_address(account.address, ensure_loaded=True)
+
+            flow_start = time.time()
+            self._ui(
+                self._start_breathing_effect,
+                "⏳ Unstaking... This may take a moment...",
+                bright_class="status-unstake",
+                dim_class="status-unstake-dim",
+            )
+            self._ui(self._set_busy, True)
+            # Ensure the UI renders the new classes before we start awaiting work.
+            await asyncio.sleep(0)
+            breathing_started = True
+            watchdog_token = self._ui(self._start_tx_watchdog, "unstake", account.address)
+
+            try:
+                handled = {"done": False}
+                wd_token = watchdog_token
+                tx_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._with_rpc_fallback,
+                        action="unstake",
                         rpc=self.rpc,
-                        key=key,
-                        address=account.address,
-                        amount=amount,
-                        show_back_button=True
+                        source_address=account.address,
+                        require_stake_support=True,
+                        fn=lambda r: unstake_xtz(
+                            r,
+                            key,
+                            amount,
+                            fee_mutez=fee_mutez,
+                            gas_limit=gas_limit,
+                            storage_limit=storage_limit,
+                        ),
                     )
                 )
 
-                if confirm_result and confirm_result.get("__BACK__"):
-                    continue
-                if not confirm_result or not confirm_result.get("ok"):
-                    self._set_status("↩️ Unstaking cancelled")
-                    return
+                def _late_done(task: "asyncio.Task") -> None:
+                    if handled["done"]:
+                        return
+                    if wd_token is not None and self._tx_watchdog_token == wd_token:
+                        return
+                    try:
+                        _, late_oph = task.result()
+                    except _FLOW_TASK_EXCEPTIONS as e:
+                        log_warning("Unstake task failed after UI timeout", exception=e, address=account.address)
+                        return
+                    try:
+                        self._add_pending_tx(
+                            address=account.address,
+                            oph=late_oph,
+                            direction="UST",
+                            amount_xtz=amount,
+                            counterparty="The baker",
+                            kind="transaction",
+                            entrypoint="unstake",
+                            history_delay_seconds=Config.TX_FLOW_TOTAL_SECONDS,
+                            processing_seconds=Config.TX_FLOW_TOTAL_SECONDS,
+                            select_wallet=False,
+                        )
+                        self._schedule_after(60.0, lambda: self._silent_refresh_history_for(account.address))
+                    except _UI_CALLBACK_EXCEPTIONS as e:
+                        log_warning("Failed to apply late unstake UI update", exception=e, address=account.address)
 
-                break
+                tx_task.add_done_callback(lambda t: self._ui(_late_done, t))
 
-            # Extra confirmation to discourage impulsive unstaking
-            confirmed = await self.push_screen_wait(
-                ConfirmScreen(
-                    "Unstaking is reversible, but your future self might judge you.\n\n"
-                    "Still want to proceed?",
-                    title="Second Thoughts",
-                    yes_label="Yes, unstake",
-                    no_label="Keep staking",
+                _, op_hash = await asyncio.wait_for(
+                    asyncio.shield(tx_task),
+                    timeout=Config.TX_RPC_HARD_TIMEOUT_SECONDS,
                 )
-            )
-            if not confirmed:
-                self._set_status("😒 Unstake canceled. Chad mode stays on.")
+                handled["done"] = True
+            except asyncio.TimeoutError:
+                if watchdog_token is not None:
+                    self._ui(self._tx_watchdog_fire, watchdog_token, "unstake", account.address)
+                self._ui(self._stop_breathing_effect)
+                self._ui(self._set_busy, False)
                 return
+            finally:
+                if watchdog_token is not None:
+                    self._ui(self._stop_tx_watchdog, watchdog_token)
+                    watchdog_token = None
 
-            # Ensure source wallet is selected so history updates match the action
-            try:
-                idx = next(i for i, acc in enumerate(self.accounts) if acc.address == account.address)
-                if self._last_selected_addr != account.address:
-                    self._ui(self._apply_account_selection, idx)
-            except StopIteration:
-                pass
-
-            # Step 3: Execute unstaking operation with confirmed parameters
-            fee_mutez = confirm_result.get("fee_mutez")
-            gas_limit = confirm_result.get("gas_limit")
-            storage_limit = confirm_result.get("storage_limit")
-
-            flow_start = time.time()
-            self._start_breathing_effect("⏳ Unstaking... This may take a moment...")
-
-            _, op_hash = self._with_rpc_fallback(
-                action="unstake",
-                rpc=self.rpc,
-                source_address=account.address,
-                require_stake_support=True,
-                fn=lambda r: unstake_xtz(
-                    r,
-                    key,
-                    amount,
-                    fee_mutez=fee_mutez,
-                    gas_limit=gas_limit,
-                    storage_limit=storage_limit,
-                ),
-            )
-
-            remaining = self._tx_flow_remaining(flow_start)
-            if remaining <= 0.1:
-                remaining = Config.TX_FLOW_TOTAL_SECONDS
-            baker_addr = None
+            remaining = self._tx_flow_remaining_or_default(flow_start)
             baker_label = "The baker"
-            try:
-                baker_addr = get_delegation_info(self.rpc, account.address)
-                if baker_addr:
-                    baker_label = self._format_baker_label(baker_addr)
-                    baker_label = self._shorten_baker_label(baker_label)
-            except Exception as e:
-                log_warning("Failed to resolve delegate baker for unstake", exception=e, address=account.address)
-            self._add_pending_tx(
+            self._ui(
+                self._add_pending_tx,
                 address=account.address,
                 oph=op_hash,
                 direction="UST",
@@ -11633,15 +12801,23 @@ class WalletApp(App):
                 counterparty=baker_label,
                 kind="transaction",
                 entrypoint="unstake",
-                history_delay_seconds=remaining,
+                history_delay_seconds=0.0,
+                processing_seconds=remaining,
+            )
+            # Resolve the actual baker address without blocking the UI.
+            self.run_worker(
+                lambda oph=op_hash, addr=account.address: self._resolve_delegate_for_pending(oph, addr),
+                exclusive=False,
+                thread=True,
             )
 
-            self._stop_breathing_effect()
-            self._status_lock_until_refresh = True
-            self._start_breathing_effect(
-                f"⚰️ Unstaked {format_xtz(amount)} XTZ. The network feels a little less safe. 😔",
-                bright_class="status-unstake",
-                dim_class="status-unstake-dim",
+            self._ui(setattr, self, "_status_lock_until_refresh", True)
+            # Keep breathing until the pending row resolves (synced with shimmer),
+            # then stop breathing in the finalizer.
+            self._ui(
+                self._set_status,
+                f"⏳ Unstake submitted - waiting for inclusion ({format_xtz(amount)} XTZ)",
+                force=True,
             )
             baked_by_box = {"label": None}
             def _resolve_label() -> None:
@@ -11654,6 +12830,7 @@ class WalletApp(App):
 
             def _finish_unstake_status() -> None:
                 self._stop_breathing_effect()
+                self._set_busy(False)
                 label = baked_by_box["label"]
                 baked_msg = get_send_baked_message(label)
                 self._set_status_styled(
@@ -11663,25 +12840,32 @@ class WalletApp(App):
                     force=True,
                 )
 
-            self.set_timer(remaining, _finish_unstake_status)
-            self._schedule_after(remaining, lambda: self._refresh_account_status_only(account.address))
-            self._schedule_after(remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
+            # Slight delay so the history row can flip from PROCESSING -> UNSTAKED first.
+            self._ui(self.set_timer, remaining + 0.05, _finish_unstake_status)
+            # Safety net: if finalize callback is skipped, do not leave breathing forever.
+            self._ui(self._schedule_after, remaining + 5.0, lambda: self._tx_finalize_failsafe("unstake", account.address))
+            self._ui(self._schedule_after, remaining, lambda: self._refresh_account_status_only(account.address))
+            self._ui(self._schedule_after, remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
 
-        except Exception as e:
+        except asyncio.CancelledError:
+            if breathing_started:
+                self._ui(self._stop_breathing_effect)
+                self._ui(self._set_busy, False)
+            if watchdog_token is not None:
+                self._ui(self._stop_tx_watchdog, watchdog_token)
+            raise
+        except _FLOW_TASK_EXCEPTIONS as e:
 
             error_msg = str(e)
             if len(error_msg) > 150:
                 error_msg = error_msg[:150] + "..."
 
-            self._stop_breathing_effect()
-            self._set_status_styled(f"❌ Unstaking failed: {error_msg}", style="error", duration=6.0)
+            self._ui(self._stop_breathing_effect)
+            self._ui(self._set_busy, False)
+            self._ui(self._set_status_styled, f"❌ Unstaking failed: {error_msg}", style="error", duration=6.0)
 
     async def _handle_delegate_action(self, stake_data: dict) -> None:
         """Handle delegation operation with passphrase from app level."""
-        import traceback
-        from sassy_wallet.core.tezos import delegate_to_baker, key_from_encoded_secret
-        from sassy_wallet.core.crypto import decrypt_secret
-
         account = stake_data.get("account")
         baker_address = stake_data.get("baker_address")
         baker_name = stake_data.get("baker_name", "Unknown Baker")
@@ -11695,106 +12879,165 @@ class WalletApp(App):
         baker_display = self._format_baker_label(baker_address)
         if baker_name and baker_name != "Unknown Baker":
             baker_display = baker_name
-        error_note = ""
-        while True:
-            passphrase = await self.push_screen_wait(
-                SendPassphraseScreen(
-                    "🔐 Enter Your Passphrase",
-                    password=True,
-                    placeholder="Your wallet passphrase",
-                    wallet_info=f"[b]{account.name}[/b]",
-                    ok_label="Next →",
-                    fun_note="Delegate like a boss! Your XTZ will thank you! 🎯",
-                    show_back_button=True,
-                    error_note=error_note,
+
+        key = stake_data.get("key")
+        fee_mutez = stake_data.get("fee_mutez")
+        gas_limit = stake_data.get("gas_limit")
+        storage_limit = stake_data.get("storage_limit")
+
+        if key is None:
+            error_note = ""
+            while True:
+                passphrase = await self.push_screen_wait(
+                    WarningPassphraseScreen(
+                        "Enter Your Encryption Password",
+                        password=True,
+                        placeholder="Your wallet encryption password",
+                        wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
+                        ok_label="Next →",
+                        fun_note="Delegate like a boss! Your XTZ will thank you! 🎯",
+                        show_back_button=True,
+                        error_note=error_note,
+                    )
                 )
-            )
 
-            if passphrase == "__BACK__":
-                await self._open_stake_flow({"account": account, "action": "delegate"})
-                return
+                if passphrase == BACK_NAV_MARKER:
+                    await self._open_stake_flow({"account": account, "action": "delegate"})
+                    return
 
-            if not passphrase:
-                self._set_status("⏸️ Delegation cancelled")
-                return
+                if not passphrase:
+                    self._set_status("⏸️ Delegation cancelled")
+                    return
 
-            try:
-                secret_key = decrypt_secret(account.enc, passphrase)
-                break
-            except Exception as decrypt_err:
-                from cryptography.exceptions import InvalidTag
-
-                if isinstance(decrypt_err, InvalidTag):
+                try:
+                    secret_key = decrypt_secret(account.enc, passphrase)
+                    key = key_from_encoded_secret(secret_key)
+                except InvalidTag:
                     error_note = "❌ Wrong passphrase. Try again."
                     continue
-                raise
+                except (ValueError, TypeError) as decrypt_err:
+                    raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
 
-        fee_result = await self.push_screen_wait(
-            ConfirmDelegateScreen(
-                self.rpc,
-                account.address,
-                baker_address,
-                show_back_button=True,
-            )
-        )
+                fee_result = await self.push_screen_wait(
+                    ConfirmDelegateScreen(
+                        self.rpc,
+                        account.address,
+                        baker_address,
+                        show_back_button=True,
+                    )
+                )
 
-        if fee_result and fee_result.get("__BACK__"):
-            await self._open_stake_flow({"account": account, "action": "delegate"})
-            return
+                if fee_result and fee_result.get(BACK_NAV_MARKER):
+                    continue
 
-        if not fee_result or not fee_result.get("ok"):
-            self._set_status("⏸️ Delegation cancelled")
-            return
+                if not fee_result or not fee_result.get("ok"):
+                    self._set_status("⏸️ Delegation cancelled")
+                    return
 
-        # Extract fee parameters from modal result
-        fee_mutez = fee_result.get("fee_mutez")
-        gas_limit = fee_result.get("gas_limit")
-        storage_limit = fee_result.get("storage_limit")
+                fee_mutez = fee_result.get("fee_mutez")
+                gas_limit = fee_result.get("gas_limit")
+                storage_limit = fee_result.get("storage_limit")
+                break
+        else:
+            if account.address != key.public_key_hash():
+                self._set_status("❌ KEY MISMATCH!")
+                return
 
-        # Apply defaults if None
-        if fee_mutez is None:
-            fee_mutez = 8000
-        if gas_limit is None:
-            gas_limit = 30000
-        if storage_limit is None:
-            storage_limit = 0
-
+        breathing_started = False
+        watchdog_token = None
         try:
             _, can_send, _ = self._ensure_working_rpc()
             if not can_send:
                 self._set_status("[red]❌ No RPC available to inject operations[/red]")
                 return
 
-            flow_start = time.time()
-            self._set_status_styled(
-                "⏳ Delegating... This may take a moment...",
-                style="warning",
-                duration=0,
-            )
-            self._start_breathing_effect("⏳ Delegating... This may take a moment...")
-
-            key = key_from_encoded_secret(secret_key)
-
             key_pkh = key.public_key_hash()
             if account.address != key_pkh:
                 self._set_status("❌ KEY MISMATCH!")
                 return
 
-            _, op_hash = self._with_rpc_fallback(
-                action="delegate",
-                rpc=self.rpc,
-                fn=lambda r: delegate_to_baker(
-                    r,
-                    key,
-                    baker_address,
-                    fee_mutez=fee_mutez,
-                    gas_limit=gas_limit,
-                    storage_limit=storage_limit,
-                ),
-            )
+            # Ensure the source wallet is selected and its history is visible immediately.
+            self._focus_history_on_address(account.address, ensure_loaded=True)
 
-            remaining = self._tx_flow_remaining(flow_start)
-            self._add_pending_tx(
+            flow_start = time.time()
+            self._ui(
+                self._start_breathing_effect,
+                "⏳ Delegating... This may take a moment...",
+                bright_class="status-warning",
+                dim_class="status-warning-dim",
+            )
+            self._ui(self._set_busy, True)
+            await asyncio.sleep(0)
+            breathing_started = True
+            watchdog_token = self._ui(self._start_tx_watchdog, "delegate", account.address)
+
+            try:
+                handled = {"done": False}
+                wd_token = watchdog_token
+                tx_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._with_rpc_fallback,
+                        action="delegate",
+                        rpc=self.rpc,
+                        fn=lambda r: delegate_to_baker(
+                            r,
+                            key,
+                            baker_address,
+                            fee_mutez=fee_mutez,
+                            gas_limit=gas_limit,
+                            storage_limit=storage_limit,
+                        ),
+                    )
+                )
+
+                def _late_done(task: "asyncio.Task") -> None:
+                    if handled["done"]:
+                        return
+                    if wd_token is not None and self._tx_watchdog_token == wd_token:
+                        return
+                    try:
+                        _, late_oph = task.result()
+                    except _FLOW_TASK_EXCEPTIONS as e:
+                        log_warning("Delegation task failed after UI timeout", exception=e, address=account.address)
+                        return
+                    try:
+                        self._add_pending_tx(
+                            address=account.address,
+                            oph=late_oph,
+                            direction="DEL",
+                            amount_xtz=Decimal(0),
+                            counterparty=baker_display,
+                            kind="delegation",
+                            entrypoint="delegation",
+                            history_delay_seconds=Config.TX_FLOW_TOTAL_SECONDS,
+                            processing_seconds=Config.TX_FLOW_TOTAL_SECONDS,
+                            select_wallet=False,
+                        )
+                        self._schedule_after(60.0, lambda: self._silent_refresh_history_for(account.address))
+                    except _UI_CALLBACK_EXCEPTIONS as e:
+                        log_warning("Failed to apply late delegation UI update", exception=e, address=account.address)
+
+                tx_task.add_done_callback(lambda t: self._ui(_late_done, t))
+
+                _, op_hash = await asyncio.wait_for(
+                    asyncio.shield(tx_task),
+                    timeout=Config.TX_RPC_HARD_TIMEOUT_SECONDS,
+                )
+                handled["done"] = True
+            except asyncio.TimeoutError:
+                if watchdog_token is not None:
+                    self._ui(self._tx_watchdog_fire, watchdog_token, "delegate", account.address)
+                self._ui(self._stop_breathing_effect)
+                self._ui(self._set_busy, False)
+                return
+            finally:
+                if watchdog_token is not None:
+                    self._ui(self._stop_tx_watchdog, watchdog_token)
+                    watchdog_token = None
+
+            remaining = self._tx_flow_remaining_or_default(flow_start)
+            self._ui(
+                self._add_pending_tx,
                 address=account.address,
                 oph=op_hash,
                 direction="DEL",
@@ -11802,30 +13045,365 @@ class WalletApp(App):
                 counterparty=baker_display,
                 kind="delegation",
                 entrypoint="delegation",
-                history_delay_seconds=remaining,
+                history_delay_seconds=0.0,
+                processing_seconds=remaining,
             )
 
-            self._schedule_after(
-                remaining,
-                lambda: self._set_status_styled_locked(
+            self._ui(
+                self._set_status,
+                f"⏳ Delegation submitted to {baker_display} - waiting for inclusion...",
+                force=True,
+            )
+            def _finish_delegate_status() -> None:
+                self._stop_breathing_effect()
+                self._set_busy(False)
+                self._set_status_styled_locked(
                     f"✅ Delegation sent to {baker_display}! 🎯",
                     style="warning",
-                ),
+                )
+            self._ui(self._schedule_after, remaining, _finish_delegate_status)
+            self._ui(
+                self._schedule_after,
+                remaining + 5.0,
+                lambda: self._tx_finalize_failsafe("delegate", account.address),
             )
-            self._schedule_after(remaining, lambda: self._refresh_account_status_only(account.address))
-            self._schedule_after(remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
-            self._schedule_after(remaining, self._stop_breathing_effect)
+            self._ui(self._schedule_after, remaining, lambda: self._refresh_account_status_only(account.address))
+            self._ui(self._schedule_after, remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
 
-        except Exception as e:
+        except asyncio.CancelledError:
+            if breathing_started:
+                self._ui(self._stop_breathing_effect)
+                self._ui(self._set_busy, False)
+            if watchdog_token is not None:
+                self._ui(self._stop_tx_watchdog, watchdog_token)
+            raise
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error("Delegation failed", exception=e)
-            self._stop_breathing_effect()
+            self._ui(self._stop_breathing_effect)
+            self._ui(self._set_busy, False)
             error_msg = str(e).strip()
             if not error_msg:
                 error_msg = "Unknown error (check logs)"
             if len(error_msg) > 150:
                 error_msg = error_msg[:150] + "..."
 
-            self._set_status_styled(f"❌ Delegation failed: {error_msg}", style="error", duration=6.0)
+            self._ui(self._set_status_styled, f"❌ Delegation failed: {error_msg}", style="error", duration=6.0)
+
+    async def _handle_change_baker_action(self, stake_data: dict, *, from_stake_screen: bool = False) -> bool:
+        """Handle change-baker operation (delegation under the hood) with a dedicated confirm screen."""
+        account = stake_data.get("account")
+        new_baker_address = stake_data.get("baker_address")
+        current_baker_address = stake_data.get("current_baker") or ""
+
+        if not account or not new_baker_address:
+            log_error("Invalid change_baker data received", stake_data=stake_data)
+            self._set_status("❌ Invalid change baker data")
+            return False
+
+        # Preflight: refresh current delegate from chain to handle external changes.
+        try:
+            state = await asyncio.to_thread(
+                get_wallet_chain_state,
+                self.rpc,
+                account.address,
+                force_refresh=True,
+                prefer_rpc=True,
+            )
+            chain_current = state.get("delegate") or ""
+            if chain_current:
+                current_baker_address = chain_current
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
+            log_warning("Failed to preflight current baker", exception=e, address=account.address)
+
+        if current_baker_address and current_baker_address == new_baker_address:
+            self._set_status("ℹ️ Already delegated to that baker.")
+            return True
+
+        key = stake_data.get("key")
+        fee_mutez = stake_data.get("fee_mutez")
+        gas_limit = stake_data.get("gas_limit")
+        storage_limit = stake_data.get("storage_limit")
+
+        if key is None:
+            error_note = ""
+            while True:
+                passphrase = await self.push_screen_wait(
+                    WarningPassphraseScreen(
+                        "Enter Your Encryption Password",
+                        password=True,
+                        placeholder="Your wallet encryption password",
+                        wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
+                        ok_label="Next →",
+                        fun_note="Switching bakers is still a delegation op (but spicier). 🔁🥐",
+                        show_back_button=True,
+                        error_note=error_note,
+                    )
+                )
+
+                if passphrase == BACK_NAV_MARKER:
+                    if from_stake_screen:
+                        return False
+                    await self._open_stake_flow({"account": account, "action": "change_baker"})
+                    return False
+
+                if not passphrase:
+                    self._set_status("⏸️ Change baker cancelled")
+                    return False
+
+                try:
+                    secret_key = decrypt_secret(account.enc, passphrase)
+                    key = key_from_encoded_secret(secret_key)
+                except InvalidTag:
+                    error_note = "❌ Wrong passphrase. Try again."
+                    continue
+                except (ValueError, TypeError) as decrypt_err:
+                    raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
+
+                confirm_result = await self.push_screen_wait(
+                    ConfirmChangeBakerScreen(
+                        rpc=self.rpc,
+                        from_addr=account.address,
+                        current_baker_address=current_baker_address,
+                        new_baker_address=new_baker_address,
+                        show_back_button=True,
+                    )
+                )
+                if confirm_result and confirm_result.get(BACK_NAV_MARKER):
+                    continue
+                if not confirm_result or not confirm_result.get("ok"):
+                    self._set_status("↩️ Change baker cancelled")
+                    return False
+
+                fee_mutez = confirm_result.get("fee_mutez")
+                gas_limit = confirm_result.get("gas_limit")
+                storage_limit = confirm_result.get("storage_limit")
+                break
+        else:
+            if account.address != key.public_key_hash():
+                self._set_status("❌ KEY MISMATCH!")
+                return False
+        new_baker_display = self._format_baker_label(new_baker_address)
+
+        # Ensure the source wallet is selected and its history is visible immediately.
+        self._focus_history_on_address(account.address, ensure_loaded=True)
+
+        flow_start = time.time()
+        self._ui(
+            self._start_breathing_effect,
+            "⏳ Changing baker... This may take a moment...",
+            bright_class="status-warning",
+            dim_class="status-warning-dim",
+        )
+        self._ui(self._set_busy, True)
+        await asyncio.sleep(0)
+        breathing_started = True
+        watchdog_token = self._ui(self._start_tx_watchdog, "change_baker", account.address)
+        op_hash = ""
+
+        try:
+            handled = {"done": False}
+            wd_token = watchdog_token
+            def _delegate_with_fallback(rpc: str):
+                def _attempt_delegate(target_rpc: str) -> str:
+                    try:
+                        return delegate_to_baker(
+                            target_rpc,
+                            key,
+                            new_baker_address,
+                            fee_mutez=fee_mutez,
+                            gas_limit=gas_limit,
+                            storage_limit=storage_limit,
+                        )
+                    except Exception as e:
+                        if not is_gas_exhausted_error(e):
+                            raise
+                        log_warning("Gas exhausted on change baker; retrying with autofill", exception=e, rpc=target_rpc)
+                        try:
+                            return delegate_to_baker(target_rpc, key, new_baker_address)
+                        except Exception as retry_e:
+                            if not is_gas_exhausted_error(retry_e):
+                                raise
+                            # Last resort on this RPC: force conservative high limits.
+                            log_warning(
+                                "Gas exhausted on change baker with autofill; retrying with safety overrides",
+                                exception=retry_e,
+                                rpc=target_rpc,
+                            )
+                            safe_fee = max(int(fee_mutez or 0), 10_000)
+                            safe_gas = max(int(gas_limit or 0), 30_000)
+                            return delegate_to_baker(
+                                target_rpc,
+                                key,
+                                new_baker_address,
+                                fee_mutez=safe_fee,
+                                gas_limit=safe_gas,
+                                storage_limit=0,
+                            )
+                try:
+                    return _attempt_delegate(rpc)
+                except Exception as e:
+                    if is_gas_exhausted_error(e):
+                        # Automatic multi-RPC fallback for persistent gas-exhausted errors.
+                        net = network_from_rpc(rpc)
+                        candidates = _MAINNET_RPC_CANDIDATES if net == "mainnet" else _GHOSTNET_RPC_CANDIDATES
+                        for alt_rpc in candidates:
+                            if alt_rpc == rpc:
+                                continue
+                            if not rpc_supports_send(alt_rpc):
+                                continue
+                            try:
+                                log_warning(
+                                    "Retrying change baker on alternate RPC after gas exhaustion",
+                                    from_rpc=rpc,
+                                    to_rpc=alt_rpc,
+                                )
+                                return _attempt_delegate(alt_rpc)
+                            except Exception as alt_e:
+                                if is_gas_exhausted_error(alt_e):
+                                    log_warning("Alternate RPC also gas exhausted for change baker", exception=alt_e, rpc=alt_rpc)
+                                    continue
+                                raise
+                    raise
+            tx_task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._with_rpc_fallback,
+                    action="change_baker",
+                    rpc=self.rpc,
+                    fn=_delegate_with_fallback,
+                )
+            )
+
+            def _late_done(task: "asyncio.Task") -> None:
+                if handled["done"]:
+                    return
+                if wd_token is not None and self._tx_watchdog_token == wd_token:
+                    return
+                try:
+                    _, late_oph = task.result()
+                except asyncio.CancelledError:
+                    log_warning("Change baker task cancelled after UI timeout", address=account.address)
+                    return
+                except Exception as e:
+                    log_warning("Change baker task failed after UI timeout", exception=e, address=account.address)
+                    return
+                try:
+                    self._add_pending_tx(
+                        address=account.address,
+                        oph=late_oph,
+                        direction="DEL",
+                        amount_xtz=Decimal(0),
+                        counterparty=new_baker_display,
+                        kind="delegation",
+                        entrypoint="change_baker",
+                        history_delay_seconds=Config.TX_FLOW_TOTAL_SECONDS,
+                        processing_seconds=Config.TX_FLOW_TOTAL_SECONDS,
+                        select_wallet=False,
+                    )
+                    self._schedule_after(60.0, lambda: self._silent_refresh_history_for(account.address))
+                except _UI_CALLBACK_EXCEPTIONS as e:
+                    log_warning("Failed to apply late change-baker UI update", exception=e, address=account.address)
+
+            tx_task.add_done_callback(lambda t: self._ui(_late_done, t))
+
+            _, op_hash = await asyncio.wait_for(
+                asyncio.shield(tx_task),
+                timeout=Config.TX_RPC_HARD_TIMEOUT_SECONDS,
+            )
+            handled["done"] = True
+        except asyncio.TimeoutError:
+            if watchdog_token is not None:
+                self._ui(self._tx_watchdog_fire, watchdog_token, "change_baker", account.address)
+            self._ui(self._stop_breathing_effect)
+            self._ui(self._set_busy, False)
+            return False
+        except asyncio.CancelledError:
+            # Keep UI consistent if the task is cancelled by the event loop/worker lifecycle.
+            self._ui(self._stop_breathing_effect)
+            self._ui(self._set_busy, False)
+            if watchdog_token is not None:
+                self._ui(self._stop_tx_watchdog, watchdog_token)
+                watchdog_token = None
+            return False
+        except Exception as e:
+            log_error("Change baker failed", exception=e)
+            if is_gas_exhausted_error(e):
+                log_warning(
+                    "Retrying change baker with final autofill fallback",
+                    address=account.address,
+                    rpc=self.rpc,
+                )
+                try:
+                    _, op_hash = await asyncio.to_thread(
+                        self._with_rpc_fallback,
+                        action="delegate",
+                        rpc=self.rpc,
+                        fn=lambda r: delegate_to_baker(r, key, new_baker_address),
+                    )
+                    log_info(
+                        "Change baker succeeded via final autofill fallback",
+                        address=account.address,
+                        op_hash=op_hash,
+                    )
+                except Exception as fallback_e:
+                    log_error("Final change baker fallback failed", exception=fallback_e)
+                    self._ui(self._stop_breathing_effect)
+                    self._ui(self._set_busy, False)
+                    error_msg = (
+                        "Gas limit exhausted on this RPC after automatic fallback. "
+                        "Try again in a moment or switch RPC."
+                    )
+                    if len(error_msg) > 150:
+                        error_msg = error_msg[:150] + "..."
+                    self._ui(self._set_status_styled, f"❌ Change baker failed: {error_msg}", style="error", duration=6.0)
+                    return False
+            else:
+                self._ui(self._stop_breathing_effect)
+                self._ui(self._set_busy, False)
+                error_msg = str(e).strip() or "Unknown error (check logs)"
+                if len(error_msg) > 150:
+                    error_msg = error_msg[:150] + "..."
+                self._ui(self._set_status_styled, f"❌ Change baker failed: {error_msg}", style="error", duration=6.0)
+                return False
+        finally:
+            if watchdog_token is not None:
+                self._ui(self._stop_tx_watchdog, watchdog_token)
+                watchdog_token = None
+
+        remaining = self._tx_flow_remaining_or_default(flow_start)
+        self._ui(
+            self._add_pending_tx,
+            address=account.address,
+            oph=op_hash,
+            direction="DEL",
+            amount_xtz=Decimal(0),
+            counterparty=new_baker_display,
+            kind="delegation",
+            entrypoint="change_baker",
+            history_delay_seconds=0.0,
+            processing_seconds=remaining,
+        )
+        self.run_worker(
+            lambda oph=op_hash, addr=account.address: self._resolve_delegate_for_pending(oph, addr),
+            exclusive=False,
+            thread=True,
+        )
+
+        self._ui(self._set_status, "⏳ Baker change submitted - waiting for inclusion...", force=True)
+
+        def _finish_change_baker_status() -> None:
+            self._stop_breathing_effect()
+            self._set_busy(False)
+            self._set_status_styled_locked("✅ Baker changed. Fresh oven, fresh rewards.", style="warning")
+
+        self._ui(self._schedule_after, remaining, _finish_change_baker_status)
+        self._ui(
+            self._schedule_after,
+            remaining + 5.0,
+            lambda: self._tx_finalize_failsafe("change_baker", account.address),
+        )
+        self._ui(self._schedule_after, remaining, lambda: self._refresh_account_status_only(account.address))
+        self._ui(self._schedule_after, remaining + 60.0, lambda: self._silent_refresh_history_for(account.address))
+        return True
 
     def action_show_address(self) -> None:
         """Show full address details in a modal."""
@@ -11844,9 +13422,6 @@ class WalletApp(App):
             return
 
         try:
-            from datetime import datetime
-            import json
-            from sassy_wallet.core.crypto import encrypt_secret
             selected_account = None
             selected_accounts: list[Account] = []
 
@@ -11867,14 +13442,14 @@ class WalletApp(App):
             passphrase = (selection.get("passphrase") or "").strip()
             confirm_passphrase = (selection.get("confirm") or "").strip()
             if not passphrase or confirm_passphrase != passphrase:
-                self._ui(self._set_status, "❌ Backup cancelled - Passphrase mismatch")
+                self._ui(self._set_status, "❌ Backup cancelled - Encryption password mismatch")
                 return
 
             # Create backup directory
             backup_dir = Path(selection.get("backup_dir") or "data/backups").expanduser()
             if backup_dir.is_file():
                 backup_dir = backup_dir.parent
-            backup_dir.mkdir(parents=True, exist_ok=True)
+            ensure_private_dir(backup_dir)
 
             # Generate filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -11932,9 +13507,8 @@ class WalletApp(App):
                 },
             }
 
-            # Write backup file
-            with open(backup_path, "w", encoding="utf-8") as f:
-                json.dump(backup_content, f, indent=2, ensure_ascii=False)
+            # Write backup file with private permissions.
+            write_private_json_atomic(backup_path, backup_content, indent=2, ensure_ascii=False)
 
             # Get file size for confirmation
             size_kb = backup_path.stat().st_size / 1024
@@ -11965,7 +13539,7 @@ class WalletApp(App):
             )
             return
 
-        except Exception as e:
+        except _LOCAL_IO_EXCEPTIONS + (ValueError, TypeError) as e:
             log_error("Backup failed", exception=e)
             self._ui(self._set_status_styled, f"❌ Backup failed: {e}", "error", 5.0)
 
@@ -12033,7 +13607,7 @@ class WalletApp(App):
             # Re-render accounts list
             self._render_accounts()
 
-        except Exception as e:
+        except _LOCAL_IO_EXCEPTIONS + (ValueError, TypeError) as e:
             log_error("Failed to delete wallet", exception=e)
             self._set_status_styled(f"❌ Failed to delete wallet: {e}", style="error", duration=5.0)
 
@@ -12079,7 +13653,7 @@ class WalletApp(App):
         try:
             # Determine backup directory
             backup_dir = Path("data/backups")
-            backup_dir.mkdir(parents=True, exist_ok=True)
+            ensure_private_dir(backup_dir)
             backup_dir_abs = backup_dir.absolute()
 
             # Step 1: Ask for backup file path
@@ -12092,7 +13666,7 @@ class WalletApp(App):
                     show_back_button=True
                 )
             )
-            if backup_path_str == "__BACK__":
+            if backup_path_str == BACK_NAV_MARKER:
                 return True
             if not backup_path_str:
                 self._set_status("↩️ Import cancelled - Bread stays in storage! 📦")
@@ -12109,6 +13683,19 @@ class WalletApp(App):
                 self._set_status(f"❌ Path is not a file: {backup_path}")
                 return False
 
+            try:
+                backup_size_bytes = backup_path.stat().st_size
+            except _LOCAL_IO_EXCEPTIONS as e:
+                log_error("Failed to read backup file metadata", exception=e)
+                self._set_status(f"❌ Failed to read backup metadata: {e}")
+                return False
+            if backup_size_bytes > Config.BACKUP_MAX_FILE_BYTES:
+                self._set_status(
+                    f"❌ Backup too large ({backup_size_bytes // 1024} KB). "
+                    f"Max {Config.BACKUP_MAX_FILE_BYTES // 1024} KB."
+                )
+                return False
+
             # Read and parse backup file
             self._set_status("🔍 Reading the recipe from the pantry...")
             try:
@@ -12118,7 +13705,7 @@ class WalletApp(App):
                 log_error("Invalid JSON in backup file", exception=e)
                 self._set_status(f"❌ Invalid backup file format! Recipe got soggy! 💧")
                 return False
-            except Exception as e:
+            except _LOCAL_IO_EXCEPTIONS as e:
                 log_error("Failed to read backup file", exception=e)
                 self._set_status(f"❌ Failed to read backup: {e}")
                 return False
@@ -12129,20 +13716,18 @@ class WalletApp(App):
                 return False
 
             if backup_data.get("encrypted"):
-                from sassy_wallet.core.crypto import decrypt_secret, EncryptedBlob
-
                 backup_type = backup_data.get("backup_type")
                 passphrase = await self.push_screen_wait(
                     PromptScreen(
-                        "🔐 Backup Passphrase",
-                        placeholder="Enter backup passphrase",
+                        "🔐 Backup Encryption Password",
+                        placeholder="Enter backup encryption password",
                         password=True,
                         ok_label="Unlock →",
                         fun_note="Unlock the recipe book.",
                         show_back_button=True,
                     )
                 )
-                if passphrase == "__BACK__":
+                if passphrase == BACK_NAV_MARKER:
                     return True
                 if not passphrase:
                     self._set_status("↩️ Import cancelled - Bread stays in storage! 📦")
@@ -12156,16 +13741,22 @@ class WalletApp(App):
                         ct_b64=blob_dict.get("ct_b64", ""),
                     )
                     payload_json = decrypt_secret(blob, passphrase)
+                    if len(payload_json.encode("utf-8")) > Config.BACKUP_MAX_DECRYPTED_BYTES:
+                        self._set_status(
+                            "❌ Backup payload too large after decryption. "
+                            "Import aborted for safety."
+                        )
+                        return False
                     backup_data = json.loads(payload_json)
                     if backup_type and not backup_data.get("backup_type"):
                         backup_data["backup_type"] = backup_type
-                except Exception as e:
+                except _CRYPTO_DECODE_EXCEPTIONS + _LOCAL_IO_EXCEPTIONS as e:
                     log_error("Failed to decrypt backup file", exception=e)
-                    self._set_status("❌ Failed to decrypt backup. Wrong passphrase?")
+                    self._set_status("❌ Failed to decrypt backup. Wrong encryption password?")
                     return False
             return await self._import_from_backup_payload(backup_data)
 
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS + _LOCAL_IO_EXCEPTIONS + _CRYPTO_DECODE_EXCEPTIONS as e:
             log_error("Backup import failed", exception=e)
             self._set_status_styled(f"❌ Import failed: {e}", style="error", duration=5.0)
             return False
@@ -12174,7 +13765,7 @@ class WalletApp(App):
         """Import wallet with secret key (auto-derives address)."""
         try:
             resp = await self.push_screen_wait(ImportSecretScreen())
-            if resp and resp.get("__BACK__"):
+            if resp and resp.get(BACK_NAV_MARKER):
                 return True
             if not resp:
                 self._set_status(get_message("import_cancel"))
@@ -12187,7 +13778,7 @@ class WalletApp(App):
             )
             return False
 
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error("Secret key import failed", exception=e)
             self._set_status_styled(f"❌ Import failed: {e}", style="error", duration=5.0)
             return False
@@ -12196,7 +13787,7 @@ class WalletApp(App):
         """Import watch-only wallet (no secret key)."""
         try:
             resp = await self.push_screen_wait(ImportWatchScreen())
-            if resp and resp.get("__BACK__"):
+            if resp and resp.get(BACK_NAV_MARKER):
                 return True
             if not resp:
                 self._set_status(get_message("import_cancel"))
@@ -12204,10 +13795,25 @@ class WalletApp(App):
             await self._import_watch_only_data(resp.get("name", ""), resp.get("address", ""))
             return False
 
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error("Watch-only import failed", exception=e)
             self._set_status_styled(f"❌ Import failed: {e}", style="error", duration=5.0)
             return False
+
+    def _require_import_field(self, value: str, cancel_status: str) -> Optional[str]:
+        normalized = (value or "").strip()
+        if normalized:
+            return normalized
+        self._set_status(cancel_status)
+        return None
+
+    def _validate_import_account_address(self, addr: str, *, allow_kt1: bool = False) -> Optional[str]:
+        normalized = (addr or "").strip()
+        valid, err = validate_tezos_address(normalized, allow_kt1=allow_kt1)
+        if not valid:
+            self._set_status(f"❌ Invalid account address: {err}")
+            return None
+        return normalized
 
     async def _import_with_secret_key_data(
         self,
@@ -12216,22 +13822,19 @@ class WalletApp(App):
         pw: str,
         secret_passphrase: str = "",
     ) -> None:
-        name = (name or "").strip()
-        secret = (secret or "").strip()
+        name = self._require_import_field(name, "↩️ Import cancelled - Name required! 🏷️")
+        if name is None:
+            return
+        secret = self._require_import_field(secret, "↩️ Import cancelled - No secret key provided! 🌾")
+        if secret is None:
+            return
         pw = pw or ""
         secret_passphrase = secret_passphrase or ""
-
-        if not name:
-            self._set_status("↩️ Import cancelled - Name required! 🏷️")
-            return
-        if not secret:
-            self._set_status("↩️ Import cancelled - No secret key provided! 🌾")
-            return
         if not pw:
-            self._set_status("↩️ Import cancelled - Passphrase required! 🔐")
+            self._set_status("↩️ Import cancelled - Password required! 🔐")
             return
 
-        if secret.startswith("edsk") and not secret_passphrase:
+        if secret.startswith("edesk") and not secret_passphrase:
             self._set_status("↩️ Import cancelled - Passphrase required for encrypted secret key! 🔐")
             return
 
@@ -12240,7 +13843,7 @@ class WalletApp(App):
             key = key_from_encoded_secret(secret, passphrase=secret_passphrase)
             addr = key.public_key_hash()
             self._set_status(f"✨ Address derived: {addr}")
-        except Exception as e:
+        except _FLOW_PRECHECK_EXCEPTIONS + (AttributeError,) as e:
             log_error("Failed to derive address from secret key", exception=e)
             self._set_status(f"❌ Invalid secret key! Can't bake bread with bad flour! 😅 Error: {e}")
             return
@@ -12266,25 +13869,22 @@ class WalletApp(App):
         derivation_path: str,
         expected_words: int,
     ) -> None:
-        name = (name or "").strip()
-        mnemonic = (mnemonic or "").strip()
+        name = self._require_import_field(name, "↩️ Import cancelled - Name required! 🏷️")
+        if name is None:
+            return
+        mnemonic = self._require_import_field(mnemonic, "↩️ Import cancelled - Mnemonic required! 🧠")
+        if mnemonic is None:
+            return
         bip39_pass = bip39_pass or ""
         pw = pw or ""
         derivation_path = (derivation_path or "").strip()
-
-        if not name:
-            self._set_status("↩️ Import cancelled - Name required! 🏷️")
-            return
-        if not mnemonic:
-            self._set_status("↩️ Import cancelled - Mnemonic required! 🧠")
-            return
         if not pw:
-            self._set_status("↩️ Import cancelled - Passphrase required! 🔐")
+            self._set_status("↩️ Import cancelled - Password required! 🔐")
             return
 
         try:
             from mnemonic import Mnemonic
-        except Exception:
+        except ImportError:
             self._set_status("❌ Missing 'mnemonic' package. Install dependencies.")
             return
 
@@ -12300,7 +13900,7 @@ class WalletApp(App):
             key = key_from_mnemonic_ledger(" ".join(words), bip39_pass, derivation_path)
             secret = key.secret_key()
             addr = key.public_key_hash()
-        except Exception as e:
+        except _FLOW_PRECHECK_EXCEPTIONS + (AttributeError,) as e:
             log_error("Failed to derive key from mnemonic", exception=e)
             self._set_status(f"❌ Failed to derive key from mnemonic: {e}")
             return
@@ -12317,19 +13917,16 @@ class WalletApp(App):
         )
 
     async def _import_watch_only_data(self, name: str, addr: str) -> None:
-        name = (name or "").strip()
-        addr = (addr or "").strip()
-
-        if not name:
-            self._set_status("↩️ Import cancelled - Name required! 🏷️")
+        name = self._require_import_field(name, "↩️ Import cancelled - Name required! 🏷️")
+        if name is None:
             return
-        if not addr:
+        if not (addr or "").strip():
             self._set_status("↩️ Import cancelled - Address required! 🥐")
             return
-
-        if not is_tz_address(addr):
-            self._set_status("❌ Invalid account address. Must be tz1/tz2/tz3/tz4")
+        addr_validated = self._validate_import_account_address(addr, allow_kt1=False)
+        if addr_validated is None:
             return
+        addr = addr_validated
 
         upsert_account(self.store, Account(name=name, address=addr, enc=None))
         save_store(self.store)
@@ -12342,40 +13939,169 @@ class WalletApp(App):
             style="info",
         )
 
+    def _validate_backup_wallet_address(self, addr: Any) -> Optional[str]:
+        normalized = (addr or "").strip()
+        if not normalized:
+            self._set_status("❌ Invalid backup: Missing address in wallet data!")
+            return None
+        valid, err = validate_tezos_address(normalized, allow_kt1=False)
+        if not valid:
+            self._set_status(f"❌ Invalid address in backup: {err}")
+            return None
+        return normalized
+
+    def _parse_backup_enc_blob(self, enc: Any) -> tuple[bool, Optional[EncryptedBlob]]:
+        if enc is None:
+            return True, None
+        if not isinstance(enc, dict):
+            self._set_status("❌ Invalid backup: encrypted wallet payload is malformed.")
+            return False, None
+        required = ("salt_b64", "nonce_b64", "ct_b64")
+        if any(not isinstance(enc.get(k), str) or not enc.get(k) for k in required):
+            self._set_status("❌ Invalid backup: encrypted wallet payload is incomplete.")
+            return False, None
+        try:
+            return True, EncryptedBlob(
+                salt_b64=enc["salt_b64"],
+                nonce_b64=enc["nonce_b64"],
+                ct_b64=enc["ct_b64"],
+            )
+        except (TypeError, ValueError, KeyError) as e:
+            log_error("Failed to parse encrypted wallet payload from backup", exception=e)
+            self._set_status("❌ Invalid backup: encrypted wallet payload is corrupted.")
+            return False, None
+
+    def _sanitize_backup_recent_destinations(self, recent_dests: Any) -> list[str]:
+        if not isinstance(recent_dests, list):
+            return []
+        sanitized: list[str] = []
+        for item in recent_dests:
+            if not isinstance(item, str):
+                continue
+            candidate = item.strip()
+            if not candidate:
+                continue
+            valid, _ = validate_tezos_address(candidate, allow_kt1=True)
+            if not valid or candidate in sanitized:
+                continue
+            sanitized.append(candidate)
+            if len(sanitized) >= Config.RECENT_DESTINATIONS_MAX:
+                break
+        return sanitized
+
+    def _sanitize_backup_recent_map(self, recent_map: Any) -> dict[str, list[str]]:
+        if not isinstance(recent_map, dict):
+            return {}
+        sanitized: dict[str, list[str]] = {}
+        for raw_addr, recent_dests in recent_map.items():
+            if not isinstance(raw_addr, str):
+                continue
+            addr = raw_addr.strip()
+            valid, _ = validate_tezos_address(addr, allow_kt1=False)
+            if not valid:
+                continue
+            safe_dests = self._sanitize_backup_recent_destinations(recent_dests)
+            if safe_dests:
+                sanitized[addr] = safe_dests
+            if len(sanitized) >= Config.BACKUP_MAX_ACCOUNTS:
+                break
+        return sanitized
+
+    def _finalize_backup_wallet_import(self, *, name: str, addr: str, enc: Optional[EncryptedBlob], backup_data: dict) -> None:
+        upsert_account(self.store, Account(name=name, address=addr, enc=enc))
+
+        recent_dests = backup_data.get("recent_destinations", [])
+        safe_recent_dests = self._sanitize_backup_recent_destinations(recent_dests)
+        if safe_recent_dests:
+            self.recent_to_by_wallet[addr] = safe_recent_dests
+
+        save_store(self.store)
+        self._render_accounts()
+        self._select_account_by_address(addr)
+
+        success_msg = get_message("import_backup", name=name)
+        if enc:
+            backup_msg = "Restored pastry with full powers! Ready to send! 🔥"
+        else:
+            backup_msg = "Restored as display-only! Watch mode activated! 👀"
+        self._set_status_styled_locked(
+            f"✓ {success_msg} {backup_msg} ✨",
+            style="info",
+        )
+        logging.info(f"Imported wallet from backup: {name} ({addr})")
+
+    def _extract_backup_wallet_data(
+        self,
+        backup_data: dict,
+    ) -> Optional[tuple[str, str, Optional[EncryptedBlob]]]:
+        wallet_data = backup_data.get("wallet")
+        if not isinstance(wallet_data, dict):
+            self._set_status("❌ Invalid backup: No wallet data found in recipe! 🤷")
+            return None
+
+        name = wallet_data.get("name", "Imported Wallet")
+        if not isinstance(name, str):
+            self._set_status("❌ Invalid backup: wallet name is malformed.")
+            return None
+        addr = wallet_data.get("address")
+        ok_enc, enc = self._parse_backup_enc_blob(wallet_data.get("enc"))
+        if not ok_enc:
+            return None
+
+        addr_validated = self._validate_backup_wallet_address(addr)
+        if addr_validated is None:
+            return None
+        return name.strip() or "Imported Wallet", addr_validated, enc
+
     async def _import_from_backup_payload(self, backup_data: dict) -> bool:
         """Import from already parsed (and decrypted) backup data."""
         try:
             if not isinstance(backup_data, dict) or not backup_data:
                 self._set_status("❌ Invalid backup: Not a valid recipe book! 📖")
                 return False
-            from sassy_wallet.core.crypto import EncryptedBlob
 
             if backup_data.get("backup_type") in ("all_wallets_encrypted", "multi_wallets_encrypted"):
                 accounts_data = backup_data.get("accounts", [])
                 if not isinstance(accounts_data, list) or not accounts_data:
                     self._set_status("❌ Invalid backup: No accounts found.")
                     return False
+                if len(accounts_data) > Config.BACKUP_MAX_ACCOUNTS:
+                    self._set_status(
+                        f"❌ Backup has too many wallets ({len(accounts_data)}). "
+                        f"Max allowed is {Config.BACKUP_MAX_ACCOUNTS}."
+                    )
+                    return False
 
                 imported = 0
                 skipped = 0
                 first_addr = ""
                 for acc_data in accounts_data:
-                    addr = acc_data.get("address")
-                    if not addr or not is_tz_address(addr):
+                    if not isinstance(acc_data, dict):
+                        skipped += 1
+                        continue
+                    addr = self._validate_backup_wallet_address(acc_data.get("address"))
+                    if addr is None:
                         skipped += 1
                         continue
                     name = acc_data.get("name", "Imported Wallet")
-                    enc = acc_data.get("enc")
-                    if isinstance(enc, dict):
-                        enc = EncryptedBlob(**enc)
+                    if not isinstance(name, str):
+                        skipped += 1
+                        continue
+                    ok_enc, enc = self._parse_backup_enc_blob(acc_data.get("enc"))
+                    if not ok_enc:
+                        skipped += 1
+                        continue
                     upsert_account(self.store, Account(name=name, address=addr, enc=enc))
                     if not first_addr:
                         first_addr = addr
                     imported += 1
 
+                if imported == 0:
+                    self._set_status("❌ Backup contains no valid wallet entries.")
+                    return False
+
                 recent_map = backup_data.get("recent_to_by_wallet", {})
-                if isinstance(recent_map, dict):
-                    self.recent_to_by_wallet.update(recent_map)
+                self.recent_to_by_wallet.update(self._sanitize_backup_recent_map(recent_map))
 
                 save_store(self.store)
                 self._render_accounts()
@@ -12390,24 +14116,10 @@ class WalletApp(App):
                 return False
 
             if backup_data.get("backup_type") == "single_wallet_encrypted":
-                wallet_data = backup_data.get("wallet")
-                if not wallet_data:
-                    self._set_status("❌ Invalid backup: No wallet data found in recipe! 🤷")
+                extracted = self._extract_backup_wallet_data(backup_data)
+                if extracted is None:
                     return False
-
-                name = wallet_data.get("name", "Imported Wallet")
-                addr = wallet_data.get("address")
-                enc = wallet_data.get("enc")
-                if isinstance(enc, dict):
-                    enc = EncryptedBlob(**enc)
-
-                if not addr:
-                    self._set_status("❌ Invalid backup: Missing address in wallet data!")
-                    return False
-
-                if not is_tz_address(addr):
-                    self._set_status(f"❌ Invalid address in backup: {addr}")
-                    return False
+                name, addr, enc = extracted
 
                 for existing in self.accounts:
                     if existing.address == addr:
@@ -12431,69 +14143,17 @@ class WalletApp(App):
                     self._set_status("↩️ Import cancelled - Nameless bread stays in the pantry! 🏷️")
                     return False
 
-                upsert_account(self.store, Account(name=name, address=addr, enc=enc))
-
-                recent_dests = backup_data.get("recent_destinations", [])
-                if recent_dests:
-                    self.recent_to_by_wallet[addr] = recent_dests
-
-                save_store(self.store)
-                self._render_accounts()
-                self._select_account_by_address(addr)
-
-                success_msg = get_message("import_backup", name=name)
-                if enc:
-                    backup_msg = "Restored pastry with full powers! Ready to send! 🔥"
-                else:
-                    backup_msg = "Restored as display-only! Watch mode activated! 👀"
-                self._set_status_styled_locked(
-                    f"✓ {success_msg} {backup_msg} ✨",
-                    style="info",
-                )
-                logging.info(f"Imported wallet from backup: {name} ({addr})")
+                self._finalize_backup_wallet_import(name=name, addr=addr, enc=enc, backup_data=backup_data)
                 return False
 
-            wallet_data = backup_data.get("wallet")
-            if not wallet_data:
-                self._set_status("❌ Invalid backup: No wallet data found in recipe! 🤷")
+            extracted = self._extract_backup_wallet_data(backup_data)
+            if extracted is None:
                 return False
+            name, addr, enc = extracted
 
-            name = wallet_data.get("name", "Imported Wallet")
-            addr = wallet_data.get("address")
-            enc = wallet_data.get("enc")
-            if isinstance(enc, dict):
-                enc = EncryptedBlob(**enc)
-
-            if not addr:
-                self._set_status("❌ Invalid backup: Missing address in wallet data!")
-                return False
-
-            if not is_tz_address(addr):
-                self._set_status(f"❌ Invalid address in backup: {addr}")
-                return False
-
-            upsert_account(self.store, Account(name=name, address=addr, enc=enc))
-
-            recent_dests = backup_data.get("recent_destinations", [])
-            if recent_dests:
-                self.recent_to_by_wallet[addr] = recent_dests
-
-            save_store(self.store)
-            self._render_accounts()
-            self._select_account_by_address(addr)
-
-            success_msg = get_message("import_backup", name=name)
-            if enc:
-                backup_msg = "Restored pastry with full powers! Ready to send! 🔥"
-            else:
-                backup_msg = "Restored as display-only! Watch mode activated! 👀"
-            self._set_status_styled_locked(
-                f"✓ {success_msg} {backup_msg} ✨",
-                style="info",
-            )
-            logging.info(f"Imported wallet from backup: {name} ({addr})")
+            self._finalize_backup_wallet_import(name=name, addr=addr, enc=enc, backup_data=backup_data)
             return False
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS + _LOCAL_IO_EXCEPTIONS + _CRYPTO_DECODE_EXCEPTIONS as e:
             log_error("Backup import failed", exception=e)
             self._set_status_styled(f"❌ Import failed: {e}", style="error", duration=5.0)
             return False
@@ -12528,18 +14188,17 @@ class WalletApp(App):
                     force=True,
                 )
                 return
-        except Exception as e:
+        except _FLOW_PRECHECK_EXCEPTIONS + (AttributeError,) as e:
             log_error("Failed to validate decrypted key", exception=e, address=from_account.address)
             self._set_status("❌ Failed to validate wallet key. Try again.", force=True)
             return
 
-        # Ensure the source wallet is selected so history/status updates match the send
-        try:
-            idx = next(i for i, acc in enumerate(self.accounts) if acc.address == from_account.address)
-            if self._last_selected_addr != from_account.address:
-                self._apply_account_selection(idx, refresh_details=False, refresh_history=False)
-        except StopIteration:
-            pass
+        # Ensure source wallet is anchored before send flow starts.
+        self._focus_history_on_address(
+            from_account.address,
+            ensure_loaded=True,
+            refresh_details=True,
+        )
 
         self._send_in_progress = True
         self._send_in_progress_token = time.time()
@@ -12578,6 +14237,13 @@ class WalletApp(App):
         self._ui(self._clear_tx_link)  # Clear any previous transaction link
 
         # Pre-flight: keep the fun prep messages before the tx action starts.
+        self._ui(
+            self._set_status_styled,
+            "🌾 Getting the dough ready…",
+            style="success",
+            duration=0.0,
+            force=True,
+        )
         self._ui(self._start_spinner, "🌾 Getting the dough ready…")
         time.sleep(0.1)
         self._ui(self._start_spinner, "🔥 Heating the oven…")
@@ -12595,6 +14261,41 @@ class WalletApp(App):
 
             flow_start = time.time()
             self._ui(self._stop_spinner)
+            def _rpc_with_timeout(fn: Callable[[], tuple[str, Any]]) -> tuple[str, Any]:
+                """
+                Run a potentially-blocking RPC call with a soft + hard timeout.
+
+                Note: we use a daemon thread so a stuck network call won't prevent
+                the app from exiting cleanly.
+                """
+                result_q: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+                def _runner() -> None:
+                    try:
+                        result_q.put((True, fn()))
+                    except BaseException as e:
+                        result_q.put((False, e))
+
+                t = threading.Thread(target=_runner, daemon=True)
+                t.start()
+
+                t.join(timeout=Config.TX_RPC_TIMEOUT_SECONDS)
+                if t.is_alive():
+                    # Soft timeout: keep breathing, but let the user know it's still working.
+                    self._ui(self._set_status, "⏳ Send is taking longer than usual… still working.", force=True)
+                    remaining = max(
+                        0.0,
+                        Config.TX_RPC_HARD_TIMEOUT_SECONDS - Config.TX_RPC_TIMEOUT_SECONDS,
+                    )
+                    t.join(timeout=remaining)
+
+                if t.is_alive():
+                    raise concurrent.futures.TimeoutError()
+
+                ok, payload = result_q.get_nowait()
+                if ok:
+                    return payload
+                raise payload
             try:
                 balance_mutez = get_balance_mutez(rpc_to_use, from_addr)
                 fee_guess = fee_mutez if fee_mutez is not None else 1200
@@ -12607,7 +14308,7 @@ class WalletApp(App):
                         staked_mutez = get_staking_balance(rpc_to_use, from_addr)
                         if staked_mutez > 0:
                             msg = "❌ Saldo disponible insuficiente (tienes fondos en staking)."
-                    except Exception as e:
+                    except _FLOW_PRECHECK_EXCEPTIONS as e:
                         log_debug(
                             "Failed to read staked balance during pre-send check",
                             exception=str(e),
@@ -12615,7 +14316,7 @@ class WalletApp(App):
                         )
                     self._ui(self._set_status, msg, force=True)
                     return
-            except Exception as e:
+            except _FLOW_PRECHECK_EXCEPTIONS as e:
                 log_warning("Pre-send balance check failed", exception=e, address=from_addr)
             self._ui(
                 self._start_breathing_effect,
@@ -12625,23 +14326,8 @@ class WalletApp(App):
             )
 
             try:
-                rpc_used, oph = self._with_rpc_fallback(
-                    action="send",
-                    rpc=rpc_to_use,
-                    fn=lambda r: send_xtz(
-                        r,
-                        key,
-                        to_addr,
-                        amount,
-                        fee_mutez=fee_mutez,
-                        gas_limit=gas_limit,
-                        storage_limit=storage_limit,
-                    ),
-                )
-            except Exception as e:
-                if fee_mutez is not None or gas_limit is not None or storage_limit is not None:
-                    log_warning("Send with overrides failed; retrying with autofill", exception=e)
-                    rpc_used, oph = self._with_rpc_fallback(
+                rpc_used, oph = _rpc_with_timeout(
+                    lambda: self._with_rpc_fallback(
                         action="send",
                         rpc=rpc_to_use,
                         fn=lambda r: send_xtz(
@@ -12649,20 +14335,58 @@ class WalletApp(App):
                             key,
                             to_addr,
                             amount,
-                            fee_mutez=None,
-                            gas_limit=None,
-                            storage_limit=None,
+                            fee_mutez=fee_mutez,
+                            gas_limit=gas_limit,
+                            storage_limit=storage_limit,
                         ),
                     )
+                )
+            except concurrent.futures.TimeoutError:
+                self._ui(self._stop_breathing_effect)
+                self._ui(
+                    self._set_status_styled,
+                    "⏳ Send timed out - check history; retry in 1-2 min if no op.",
+                    style="error",
+                    duration=6.0,
+                    force=True,
+                )
+                return
+            except _FLOW_TASK_EXCEPTIONS as e:
+                if fee_mutez is not None or gas_limit is not None or storage_limit is not None:
+                    log_warning("Send with overrides failed; retrying with autofill", exception=e)
+                    try:
+                        rpc_used, oph = _rpc_with_timeout(
+                            lambda: self._with_rpc_fallback(
+                                action="send",
+                                rpc=rpc_to_use,
+                                fn=lambda r: send_xtz(
+                                    r,
+                                    key,
+                                    to_addr,
+                                    amount,
+                                    fee_mutez=None,
+                                    gas_limit=None,
+                                    storage_limit=None,
+                                ),
+                            )
+                        )
+                    except concurrent.futures.TimeoutError:
+                        self._ui(self._stop_breathing_effect)
+                        self._ui(
+                            self._set_status_styled,
+                            "⏳ Send timed out - check history; retry in 1-2 min if no op.",
+                            style="error",
+                            duration=6.0,
+                            force=True,
+                        )
+                        return
                 else:
                     raise
             logging.info(f"Transaction injected: {oph}")
 
             self._push_recent_to(from_addr, to_addr)
             baker_label_box = {"label": None}
-            remaining = self._tx_flow_remaining(flow_start)
-            if remaining <= 0.1:
-                remaining = Config.TX_FLOW_TOTAL_SECONDS
+            remaining = self._tx_flow_remaining_or_default(flow_start)
             self._ui(
                 self._add_pending_tx,
                 address=from_addr,
@@ -12675,6 +14399,9 @@ class WalletApp(App):
                 history_delay_seconds=0.0,
                 processing_seconds=remaining,
             )
+            # Keep breathing (green) until the processing shimmer resolves.
+            self._ui(self._set_status, "⏳ Send submitted - waiting for inclusion...", force=True)
+            # History prefetched earlier; pending row is added via _add_pending_tx.
 
             tzkt = tzkt_ui_base_from_rpc(rpc_used)
             oph_short = f"{oph[:10]}...{oph[-8:]}" if len(oph) > 20 else oph
@@ -12692,12 +14419,12 @@ class WalletApp(App):
                     self._show_tx_link(oph_short, tzkt_link)
                     self._invalidate_history_cache(from_addr)
                     self._invalidate_balance_cache(from_addr)
-                    self._schedule_after(60.0, lambda: self._load_history_for_selected(force=True, quiet=True))
+                    self._schedule_after(60.0, lambda: self._silent_refresh_history_for(from_addr))
                     try:
                         self.query_one("#history", ListView).focus()
-                    except Exception as e:
+                    except _UI_CALLBACK_EXCEPTIONS as e:
                         log_error("Failed to focus history after send", exception=e)
-                except Exception as e:
+                except _UI_CALLBACK_EXCEPTIONS as e:
                     log_error("Failed to finalize send status", exception=e)
                     self._set_status("✅ TX sent — check history", force=True)
                 finally:
@@ -12716,10 +14443,10 @@ class WalletApp(App):
                     wait_seconds=remaining,
                 )
                 baker_label_box["label"] = resolved_label
-            except Exception as e:
+            except _FLOW_TASK_EXCEPTIONS as e:
                 log_warning("Failed to resolve baked-by baker for send", exception=e, oph=oph)
 
-        except Exception as e:
+        except _FLOW_TASK_EXCEPTIONS as e:
             log_error("Transaction failed", exception=e)
             self._ui(self._stop_breathing_effect)
             msg = f"❌ Baking failed: {e}"
@@ -12738,7 +14465,7 @@ class WalletApp(App):
                     self._ui(self._clear_account_loading, from_addr)
                     self._ui(self._refresh_account_row, from_addr)
                     self._ui(self._set_busy, False)
-                except Exception as e:
+                except _UI_CALLBACK_EXCEPTIONS as e:
                     log_warning("Failed to finalize send cleanup", exception=e, address=from_addr)
 
     # --- Button wiring ---
@@ -12760,6 +14487,12 @@ class WalletApp(App):
 
     @on(Button.Pressed, "#stake")
     def on_stake_pressed(self) -> None:
+        now = time.time()
+        if now < self._stake_button_cooldown_until:
+            log_info("Main stake button press ignored by cooldown")
+            return
+        self._stake_button_cooldown_until = now + 1.5
+        log_info("Main stake button pressed")
         self.action_stake()
 
     @on(Button.Pressed, "#backup")
@@ -12783,7 +14516,7 @@ if __name__ == "__main__":
     setup_logging()
     try:
         WalletApp().run()
-    except Exception as e:
+    except BaseException as e:
         log_error("Application crashed", exception=e)
         logging.critical(f"Application crashed: {e}", exc_info=True)
         raise

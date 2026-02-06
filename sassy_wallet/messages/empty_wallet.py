@@ -8,8 +8,7 @@ Message Categories:
 - 🚨 EMPTY: Funny, ironic messages encouraging the user to import a wallet
 """
 
-import random
-from typing import Literal
+import secrets
 
 # ============================================================================
 # NO WALLETS IMPORTED: EMPTY MESSAGES 🚨
@@ -68,7 +67,7 @@ def get_empty_wallet_message() -> str:
         >>> get_empty_wallet_message()
         "🚨 Import a wallet for god sake! This bakery needs customers!"
     """
-    return random.choice(EMPTY_WALLET_MESSAGES)
+    return secrets.choice(EMPTY_WALLET_MESSAGES)
 
 
 # ============================================================================

@@ -15,9 +15,8 @@ Balance Tiers:
 Combined with staking status for personalized messages!
 """
 
-import random
+import secrets
 from decimal import Decimal
-from typing import Literal
 
 # ============================================================================
 # TIER DEFINITIONS (balance ranges in XTZ)
@@ -358,7 +357,7 @@ def get_balance_message(balance_xtz: Decimal, is_staking: bool, is_delegating: b
         else:
             messages = WHALE_LAZY
 
-    return random.choice(messages)
+    return secrets.choice(messages)
 
 
 # ============================================================================

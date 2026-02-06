@@ -8,6 +8,7 @@ amounts, and transaction parameters.
 from decimal import Decimal, InvalidOperation
 import re
 from typing import Tuple, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from pytezos.crypto.encoding import base58_decode
 
@@ -25,11 +26,22 @@ _ALL_TZ_RE = re.compile(r"^tz[1-4][1-9A-HJ-NP-Za-km-z]{33}$")
 # Numeric patterns
 _DECIMAL_RE = re.compile(r"^-?\d+(\.\d+)?$")
 _INT_RE = re.compile(r"^-?\d+$")
+_TZ_PATTERNS = {
+    "tz1": _TZ1_RE,
+    "tz2": _TZ2_RE,
+    "tz3": _TZ3_RE,
+    "tz4": _TZ4_RE,
+}
+_BASE58_DECODE_EXCEPTIONS = (ValueError, TypeError)
+_URL_CONTROL_CHARS = ("\r", "\n", "\t")
 
 
-class ValidationError(Exception):
-    """Custom exception for validation errors."""
-    pass
+def _has_valid_base58_checksum(addr: str) -> bool:
+    try:
+        base58_decode(addr.encode("utf-8"))
+        return True
+    except _BASE58_DECODE_EXCEPTIONS:
+        return False
 
 
 def is_valid_tz_address(addr: str) -> bool:
@@ -64,33 +76,6 @@ def is_valid_kt1_address(addr: str) -> bool:
     return bool(_KT1_RE.match(addr))
 
 
-def is_valid_tezos_address(addr: str) -> bool:
-    """
-    Check if a string is a valid Tezos address (tz1/tz2/tz3/tz4 or KT1).
-
-    Args:
-        addr: Address string to validate
-
-    Returns:
-        True if valid Tezos address, False otherwise
-    """
-    return is_valid_tz_address(addr) or is_valid_kt1_address(addr)
-
-
-def is_valid_baker_address(addr: str) -> bool:
-    """
-    Check if a string is a valid baker address.
-    Bakers must be tz1/tz2/tz3/tz4 addresses (not KT1).
-
-    Args:
-        addr: Address string to validate
-
-    Returns:
-        True if valid baker address, False otherwise
-    """
-    return is_valid_tz_address(addr)
-
-
 def validate_tezos_address(addr: str, allow_kt1: bool = True) -> Tuple[bool, Optional[str]]:
     """
     Validate a Tezos address and return detailed error message if invalid.
@@ -113,52 +98,27 @@ def validate_tezos_address(addr: str, allow_kt1: bool = True) -> Tuple[bool, Opt
     if len(addr) != 36:
         return False, f"Invalid address length: {len(addr)} (must be 36 characters)"
 
-    # Check prefix and base58 checksum
-    if addr.startswith("tz1"):
-        if _TZ1_RE.match(addr):
-            try:
-                base58_decode(addr.encode("utf-8"))
-            except Exception:
-                return False, "🥐 Wrong dough — checksum doesn't rise (tz1)"
-            return True, None
-        return False, "Invalid tz1 address format (check for invalid characters)"
-    elif addr.startswith("tz2"):
-        if _TZ2_RE.match(addr):
-            try:
-                base58_decode(addr.encode("utf-8"))
-            except Exception:
-                return False, "🥐 Wrong dough — checksum doesn't rise (tz2)"
-            return True, None
-        return False, "Invalid tz2 address format (check for invalid characters)"
-    elif addr.startswith("tz3"):
-        if _TZ3_RE.match(addr):
-            try:
-                base58_decode(addr.encode("utf-8"))
-            except Exception:
-                return False, "🥐 Wrong dough — checksum doesn't rise (tz3)"
-            return True, None
-        return False, "Invalid tz3 address format (check for invalid characters)"
-    elif addr.startswith("tz4"):
-        if _TZ4_RE.match(addr):
-            try:
-                base58_decode(addr.encode("utf-8"))
-            except Exception:
-                return False, "🥐 Wrong dough — checksum doesn't rise (tz4)"
-            return True, None
-        return False, "Invalid tz4 address format (check for invalid characters)"
-    elif addr.startswith("KT1"):
+    # Check tz1..tz4 prefixes and base58 checksum.
+    for prefix, pattern in _TZ_PATTERNS.items():
+        if not addr.startswith(prefix):
+            continue
+        if not pattern.match(addr):
+            return False, f"Invalid {prefix} address format (check for invalid characters)"
+        if not _has_valid_base58_checksum(addr):
+            return False, f"🥐 Wrong dough — checksum doesn't rise ({prefix})"
+        return True, None
+
+    if addr.startswith("KT1"):
         if not allow_kt1:
             return False, "KT1 addresses are not valid for this operation (must use tz1/tz2/tz3/tz4)"
-        if _KT1_RE.match(addr):
-            try:
-                base58_decode(addr.encode("utf-8"))
-            except Exception:
-                return False, "🥐 Wrong dough — checksum doesn't rise (KT1)"
-            return True, None
-        return False, "Invalid KT1 address format (check for invalid characters)"
-    else:
-        valid_prefixes = "tz1, tz2, tz3, tz4" + (", KT1" if allow_kt1 else "")
-        return False, f"Invalid address prefix (must start with {valid_prefixes})"
+        if not _KT1_RE.match(addr):
+            return False, "Invalid KT1 address format (check for invalid characters)"
+        if not _has_valid_base58_checksum(addr):
+            return False, "🥐 Wrong dough — checksum doesn't rise (KT1)"
+        return True, None
+
+    valid_prefixes = "tz1, tz2, tz3, tz4" + (", KT1" if allow_kt1 else "")
+    return False, f"Invalid address prefix (must start with {valid_prefixes})"
 
 
 def validate_baker_address(addr: str) -> Tuple[bool, Optional[str]]:
@@ -366,3 +326,53 @@ def get_address_type(addr: str) -> Optional[str]:
         return "KT1"
 
     return None
+
+
+def normalize_https_url(
+    url: str,
+    *,
+    allow_query: bool = True,
+    allow_fragment: bool = False,
+) -> str:
+    """
+    Validate and normalize an HTTPS URL.
+
+    - Only `https://` is allowed.
+    - URL credentials are rejected.
+    - Query/fragment can be restricted by callers.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        raise ValueError("URL cannot be empty")
+    if any(ch in raw for ch in _URL_CONTROL_CHARS):
+        raise ValueError("URL contains control characters")
+
+    parsed = urlsplit(raw)
+    scheme = (parsed.scheme or "").lower()
+    if scheme != "https":
+        raise ValueError("Only HTTPS URLs are allowed")
+    if not parsed.netloc or parsed.hostname is None:
+        raise ValueError("URL host is required")
+    if parsed.username or parsed.password:
+        raise ValueError("URL credentials are not allowed")
+    if not allow_query and parsed.query:
+        raise ValueError("URL query is not allowed")
+    if not allow_fragment and parsed.fragment:
+        raise ValueError("URL fragment is not allowed")
+
+    query = parsed.query if allow_query else ""
+    fragment = parsed.fragment if allow_fragment else ""
+    return urlunsplit((scheme, parsed.netloc, parsed.path or "", query, fragment))
+
+
+def normalize_rpc_url(rpc: str) -> str:
+    """
+    Validate and normalize an RPC base URL.
+
+    RPC URLs must be HTTPS and cannot contain query/fragment components.
+    Trailing slash is removed to avoid malformed URL joins.
+    """
+    normalized = normalize_https_url(rpc, allow_query=False, allow_fragment=False)
+    parsed = urlsplit(normalized)
+    path = (parsed.path or "").rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))

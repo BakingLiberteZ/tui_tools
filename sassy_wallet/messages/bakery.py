@@ -9,7 +9,7 @@ Metaphor Guide:
 - 🪟 DISPLAY/SHELF: Used for COMPLETED data (history, balance, refresh)
 """
 
-import random
+import secrets
 from typing import Literal
 
 # ============================================================================
@@ -375,7 +375,7 @@ def get_message(context: MessageContext, **kwargs) -> str:
     }
 
     messages = messages_map.get(context, ["Message not found"])
-    message = random.choice(messages)
+    message = secrets.choice(messages)
 
     # Format with kwargs if provided
     if kwargs:
@@ -390,17 +390,17 @@ def get_message(context: MessageContext, **kwargs) -> str:
 
 def get_spinner_message() -> str:
     """Get a random spinner/loading message."""
-    return random.choice(SPINNER_MESSAGES)
+    return secrets.choice(SPINNER_MESSAGES)
 
 
 def get_baker_message() -> str:
     """Get a random baker/delegation message."""
-    return random.choice(BAKER_MESSAGES)
+    return secrets.choice(BAKER_MESSAGES)
 
 
 def get_wallet_loading_message() -> str:
     """Get a random wallet loading message for stake screen."""
-    return random.choice(WALLET_LOADING)
+    return secrets.choice(WALLET_LOADING)
 
 
 # ============================================================================

@@ -5,7 +5,7 @@ Provides fun, educational messages that encourage decentralization
 by promoting delegation to smaller bakers.
 """
 
-import random
+import secrets
 from typing import Optional
 from decimal import Decimal
 
@@ -155,7 +155,7 @@ def get_baker_commentary(baker_balance_xtz: Optional[Decimal]) -> str:
     if not messages:
         return "✨ Nice choice!"
 
-    return random.choice(messages)
+    return secrets.choice(messages)
 
 
 def get_baker_tier_emoji(baker_balance_xtz: Optional[Decimal]) -> str:
@@ -278,4 +278,4 @@ def get_decentralization_recommendation() -> str:
         "🚀 **Level up:** Supporting small bakers is a gigabrain Tezos move!",
     ]
 
-    return random.choice(recommendations)
+    return secrets.choice(recommendations)

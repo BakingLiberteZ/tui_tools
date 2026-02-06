@@ -1,12 +1,113 @@
 import json
+import os
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, TypedDict
 
 from .crypto import EncryptedBlob
-from .logger import log_error
+from .logger import log_error, log_info, log_debug
 
-DEFAULT_PATH = Path("data/wallet.json")
+STORE_PATH_ENV = "SASSY_WALLET_STORE_PATH"
+DATA_DIR_ENV = "SASSY_WALLET_DATA_DIR"
+_STORE_IO_EXCEPTIONS = (OSError, PermissionError)
+_STORE_WRITE_EXCEPTIONS = _STORE_IO_EXCEPTIONS + (TypeError, ValueError)
+_PRIVATE_FILE_MODE = 0o600
+_PRIVATE_DIR_MODE = 0o700
+
+_LAST_MIGRATION: Optional[Dict[str, str]] = None
+
+
+def _chmod_best_effort(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except _STORE_IO_EXCEPTIONS as e:
+        log_debug("Failed to chmod path", exception=str(e), path=str(path), mode=oct(mode))
+
+
+def ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIR_MODE)
+    _chmod_best_effort(path, _PRIVATE_DIR_MODE)
+
+
+def ensure_private_file(path: Path) -> None:
+    if path.exists():
+        _chmod_best_effort(path, _PRIVATE_FILE_MODE)
+
+
+def ensure_private_files_in_dir(path: Path, *, suffixes: tuple[str, ...] = ()) -> None:
+    """
+    Enforce private permissions on existing files inside a directory.
+
+    If `suffixes` is provided, only files with matching suffixes are updated.
+    """
+    ensure_private_dir(path)
+    for entry in path.iterdir():
+        if not entry.is_file():
+            continue
+        if suffixes and entry.suffix not in suffixes:
+            continue
+        ensure_private_file(entry)
+
+
+def write_private_text_atomic(path: Path, payload: str) -> None:
+    ensure_private_dir(path.parent)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
+    tmp_path = Path(tmp_name)
+    try:
+        try:
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+        except (AttributeError, OSError, PermissionError):
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        ensure_private_file(path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except _STORE_IO_EXCEPTIONS:
+                pass
+
+
+def write_private_json_atomic(
+    path: Path,
+    payload: Dict[str, Any],
+    *,
+    indent: int = 2,
+    ensure_ascii: bool = False,
+) -> None:
+    text = json.dumps(payload, indent=indent, ensure_ascii=ensure_ascii)
+    write_private_text_atomic(path, text)
+
+def _default_store_path() -> Path:
+    override = os.environ.get(STORE_PATH_ENV)
+    if override:
+        return Path(override).expanduser()
+    data_dir = os.environ.get(DATA_DIR_ENV)
+    if data_dir:
+        return Path(data_dir).expanduser() / "wallet.json"
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    return base / "sassy-wallet" / "wallet.json"
+
+
+DEFAULT_PATH = _default_store_path()
+LEGACY_PATH = Path("data/wallet.json")
+
+
+def _has_path_override() -> bool:
+    return bool(os.environ.get(STORE_PATH_ENV) or os.environ.get(DATA_DIR_ENV))
+
+
+def get_store_path() -> Path:
+    return _default_store_path()
+
+
+def get_last_migration() -> Optional[Dict[str, str]]:
+    return _LAST_MIGRATION
 
 
 @dataclass
@@ -46,19 +147,38 @@ def _default_store() -> Dict[str, Any]:
     }
 
 
-def load_store(path: Path = DEFAULT_PATH) -> Dict[str, Any]:
+def load_store(path: Optional[Path] = None) -> Dict[str, Any]:
     """
     Carga el store desde JSON.
     - Si no existe, crea un store por defecto.
     - Si el JSON está corrupto/invalidado, lo respalda y crea uno nuevo
       para que la app no muera con JSONDecodeError.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if path is None:
+        path = _default_store_path()
+        default_used = True
+    else:
+        default_used = False
+
+    requested_path = path
+    if default_used and not _has_path_override() and not path.exists() and LEGACY_PATH.exists():
+        path = LEGACY_PATH
+
+    try:
+        ensure_private_dir(path.parent)
+    except _STORE_IO_EXCEPTIONS as e:
+        log_error("Failed to create store directory", exception=e, path=str(path.parent))
+        return _default_store()
 
     if not path.exists():
         return _default_store()
+    ensure_private_file(path)
 
-    raw = path.read_text("utf-8").strip()
+    try:
+        raw = path.read_text("utf-8").strip()
+    except _STORE_IO_EXCEPTIONS as e:
+        log_error("Failed to read store file", exception=e, path=str(path))
+        return _default_store()
     if not raw:
         return _default_store()
 
@@ -67,8 +187,8 @@ def load_store(path: Path = DEFAULT_PATH) -> Dict[str, Any]:
     except json.JSONDecodeError:
         backup = path.with_suffix(".json.bak")
         try:
-            backup.write_text(raw, encoding="utf-8")
-        except Exception as e:
+            write_private_text_atomic(backup, raw)
+        except _STORE_IO_EXCEPTIONS as e:
             log_error("Failed to write backup file for corrupted store", exception=e, backup_path=str(backup))
         data = _default_store()
         save_store(data, path=path)
@@ -114,12 +234,26 @@ def load_store(path: Path = DEFAULT_PATH) -> Dict[str, Any]:
             else:
                 tp[k] = str(v).strip()
 
+    if path != requested_path:
+        try:
+            save_store(data, path=requested_path)
+            global _LAST_MIGRATION
+            _LAST_MIGRATION = {"from": str(path), "to": str(requested_path)}
+            log_info("Migrated legacy store to default path", from_path=str(path), to_path=str(requested_path))
+        except _STORE_WRITE_EXCEPTIONS as e:
+            log_error("Failed to migrate legacy store to default path", exception=e, path=str(requested_path))
+
     return data
 
 
-def save_store(data: Dict[str, Any], path: Path = DEFAULT_PATH) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+def save_store(data: Dict[str, Any], path: Optional[Path] = None) -> None:
+    if path is None:
+        path = _default_store_path()
+    try:
+        payload = json.dumps(data, indent=2, ensure_ascii=True)
+        write_private_text_atomic(path, payload)
+    except _STORE_WRITE_EXCEPTIONS as e:
+        log_error("Failed to save store", exception=e, path=str(path))
 
 
 def list_accounts(data: Dict[str, Any]) -> List[Account]:

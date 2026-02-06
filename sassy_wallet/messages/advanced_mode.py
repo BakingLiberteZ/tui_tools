@@ -7,7 +7,7 @@ who think they need to manually configure gas/fee parameters.
 Message tone: "You think you're an expert? Just pick a normal option!"
 """
 
-import random
+import secrets
 
 # ============================================================================
 # ADVANCED MODE ATTEMPT MESSAGES 🤓
@@ -57,7 +57,7 @@ def get_advanced_mode_message() -> str:
         >>> get_advanced_mode_message()
         "🤓 Oh wow, an EXPERT! Just pick Economy/Normal/Priority like everyone else. ¬¬"
     """
-    return random.choice(ADVANCED_MODE_MESSAGES)
+    return secrets.choice(ADVANCED_MODE_MESSAGES)
 
 
 # ============================================================================

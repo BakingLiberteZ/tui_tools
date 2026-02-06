@@ -2,7 +2,7 @@
 Fun messages for modal windows - Sassy Wallet style!
 All messages are baking/cooking themed to match the Sassy Wallet personality.
 """
-import random
+import secrets
 
 # Backup Modal Messages
 BACKUP_MESSAGES = [
@@ -319,4 +319,4 @@ def get_modal_message(context: str) -> str:
     }
 
     messages = messages_map.get(context, ["🥖 Let's bake some bread!"])
-    return random.choice(messages)
+    return secrets.choice(messages)

@@ -1,4 +1,4 @@
-import random
+import secrets
 
 
 BAKED_MESSAGES_WITH_BAKER = [
@@ -34,5 +34,5 @@ BAKED_MESSAGES_GENERIC = [
 
 def get_send_baked_message(baker_label: str | None) -> str:
     if baker_label:
-        return random.choice(BAKED_MESSAGES_WITH_BAKER).format(baker=baker_label)
-    return random.choice(BAKED_MESSAGES_GENERIC)
+        return secrets.choice(BAKED_MESSAGES_WITH_BAKER).format(baker=baker_label)
+    return secrets.choice(BAKED_MESSAGES_GENERIC)
