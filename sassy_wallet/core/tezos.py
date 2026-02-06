@@ -1569,12 +1569,36 @@ def estimate_delegation(rpc: str, from_addr: str, baker_address: str) -> Dict[st
     reveal_fee_mutez = 1300 if reveal_needed else 0
     reveal_info = {"fee_mutez": 1300, "gas_limit": 10000, "storage_limit": 0} if reveal_needed else None
 
-    # Delegation is cheap; keep a safety margin while remaining reasonable.
-    # The app will still use autofill in economy mode.
-    normal_fee = 800   # ~0.0008 XTZ
-    normal_gas = 1000  # generous margin over typical ~169 gas
-    priority_fee = 1200
-    priority_gas = 2000
+    # Delegation is usually cheap, but change-baker with active stake can consume
+    # significantly more gas due to implicit unstake mechanics.
+    # Detect stake context and raise suggested limits proactively.
+    has_stake_context = False
+    try:
+        chain_state = get_wallet_chain_state(rpc, from_addr, force_refresh=False, prefer_rpc=True)
+        staked_mutez = int(chain_state.get("staked_mutez") or 0)
+        unstaked_mutez = int(chain_state.get("unstaked_mutez") or 0)
+        has_stake_context = bool(staked_mutez > 0 or unstaked_mutez > 0)
+    except _RPC_IO_EXCEPTIONS + _PARSE_EXCEPTIONS + (RuntimeError,) as chain_state_err:
+        log_debug(
+            "Could not determine stake context for delegation estimate",
+            address=from_addr,
+            exception=str(chain_state_err),
+        )
+
+    if has_stake_context:
+        economy_fee = 6000
+        economy_gas = 25000
+        normal_fee = 8000
+        normal_gas = 30000
+        priority_fee = 12000
+        priority_gas = 60000
+    else:
+        economy_fee = 600
+        economy_gas = 800
+        normal_fee = 800   # ~0.0008 XTZ
+        normal_gas = 1000  # generous margin over typical ~169 gas
+        priority_fee = 1200
+        priority_gas = 2000
 
     tx_info = {"fee_mutez": normal_fee, "gas_limit": normal_gas, "storage_limit": 0}
 
@@ -1584,8 +1608,8 @@ def estimate_delegation(rpc: str, from_addr: str, baker_address: str) -> Dict[st
             "label": "Economy (autofill)",
             "tx_fee_mutez": None,
             "gas_limit": None,
-            "total_fee_mutez": reveal_fee_mutez + normal_fee,
-            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + normal_fee),
+            "total_fee_mutez": reveal_fee_mutez + economy_fee,
+            "total_fee_xtz": mutez_to_xtz(reveal_fee_mutez + economy_fee),
         },
         "normal": {
             "label": "Normal (recommended)",
@@ -1996,17 +2020,72 @@ def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optiona
                     log_error("Delegation op sanity check failed", exception=e, baker=baker_address)
                     raise
 
-                # Sign and inject - trust autofill() to have set everything correctly
+                def _inject_delegate_once(
+                    *,
+                    fee_override: Optional[int] = None,
+                    gas_override: Optional[int] = None,
+                    storage_override: Optional[int] = None,
+                ):
+                    candidate = fresh_client.delegation(baker_address)
+                    if fee_override is not None or gas_override is not None or storage_override is not None:
+                        try:
+                            candidate = candidate.autofill(
+                                fee=int(fee_override) if fee_override is not None else None,
+                                gas_limit=int(gas_override) if gas_override is not None else None,
+                                storage_limit=int(storage_override) if storage_override is not None else None,
+                            )
+                        except TypeError:
+                            candidate = candidate.autofill()
+                    else:
+                        candidate = candidate.autofill()
+
+                    fill_kwargs: dict[str, int] = {}
+                    if fee_override is not None:
+                        fill_kwargs["fee"] = int(fee_override)
+                    if gas_override is not None:
+                        fill_kwargs["gas_limit"] = int(gas_override)
+                    if storage_override is not None:
+                        fill_kwargs["storage_limit"] = int(storage_override)
+                    if fill_kwargs and hasattr(candidate, "fill"):
+                        candidate = candidate.fill(**fill_kwargs)
+
+                    candidate = candidate.sign()
+                    return candidate.inject()
+
+                # Sign and inject - trust autofill() to have set everything correctly.
                 try:
                     op = op.sign()
                     result = op.inject()
                 except _OP_RETRY_EXCEPTIONS as inject_err:
-                    if overrides_used and _is_gas_exhausted_error(inject_err):
-                        log_warning("Gas exhausted on delegation overrides; retrying with autofill", exception=inject_err)
-                        op = fresh_client.delegation(baker_address).autofill().sign()
-                        result = op.inject()
-                    else:
+                    if not _is_gas_exhausted_error(inject_err):
                         raise
+                    log_warning(
+                        "Gas exhausted on delegation; retrying with pure autofill",
+                        exception=inject_err,
+                        rpc=rpc,
+                        overrides_used=overrides_used,
+                    )
+                    try:
+                        result = _inject_delegate_once()
+                    except _OP_RETRY_EXCEPTIONS as autofill_err:
+                        if not _is_gas_exhausted_error(autofill_err):
+                            raise
+                        safe_fee = max(int(fee_mutez or 0), 15_000)
+                        safe_gas = max(int(gas_limit or 0), 120_000)
+                        safe_storage = max(int(storage_limit or 0), 0)
+                        log_warning(
+                            "Gas exhausted on delegation with pure autofill; retrying with conservative safety overrides",
+                            exception=autofill_err,
+                            rpc=rpc,
+                            fee_mutez=safe_fee,
+                            gas_limit=safe_gas,
+                            storage_limit=safe_storage,
+                        )
+                        result = _inject_delegate_once(
+                            fee_override=safe_fee,
+                            gas_override=safe_gas,
+                            storage_override=safe_storage,
+                        )
 
                 # Normalize result
                 if isinstance(result, dict):

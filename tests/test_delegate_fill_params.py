@@ -64,3 +64,131 @@ def test_delegate_to_baker_fill_includes_autofilled_limits(monkeypatch):
     assert kwargs.get("fee") == 500
     assert kwargs.get("gas_limit") == 169
     assert kwargs.get("storage_limit") == 0
+
+
+class _GasFallbackOp:
+    def __init__(self, recorder):
+        self.recorder = recorder
+        self._fee = 500
+        self._gas = 169
+        self._storage = 0
+
+    def autofill(self, **kwargs):
+        self.recorder.append(("autofill", kwargs))
+        if kwargs.get("fee") is not None:
+            self._fee = int(kwargs["fee"])
+        if kwargs.get("gas_limit") is not None:
+            self._gas = int(kwargs["gas_limit"])
+        if kwargs.get("storage_limit") is not None:
+            self._storage = int(kwargs["storage_limit"])
+        return self
+
+    def json_payload(self):
+        return [{
+            "contents": [{
+                "kind": "delegation",
+                "delegate": "tz1NEW",
+                "gas_limit": str(self._gas),
+                "storage_limit": str(self._storage),
+            }]
+        }]
+
+    def fill(self, **kwargs):
+        self.recorder.append(("fill", kwargs))
+        if kwargs.get("fee") is not None:
+            self._fee = int(kwargs["fee"])
+        if kwargs.get("gas_limit") is not None:
+            self._gas = int(kwargs["gas_limit"])
+        if kwargs.get("storage_limit") is not None:
+            self._storage = int(kwargs["storage_limit"])
+        return self
+
+    def sign(self):
+        self.recorder.append(("sign", {}))
+        return self
+
+    def inject(self):
+        self.recorder.append(("inject", {"fee": self._fee, "gas_limit": self._gas, "storage_limit": self._storage}))
+        if self._gas < 120000:
+            raise RuntimeError("gas_exhausted.operation")
+        return "op_safe"
+
+
+class _GasFallbackClient:
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    def delegation(self, baker_address):
+        assert baker_address == "tz1NEW"
+        self.recorder.append(("delegation", {"delegate": baker_address}))
+        return _GasFallbackOp(self.recorder)
+
+
+def test_delegate_to_baker_gas_exhausted_retries_with_high_safety_limits(monkeypatch):
+    recorder = []
+
+    def _fake_using(*, shell, key):
+        return _GasFallbackClient(recorder)
+
+    monkeypatch.setattr(tezos, "pytezos", type("P", (), {"using": staticmethod(_fake_using)}))
+    monkeypatch.setattr(tezos, "check_pending_operations", lambda rpc, addr: None)
+    monkeypatch.setattr(tezos, "is_wallet_revealed", lambda rpc, addr: True)
+
+    class _Key:
+        def public_key_hash(self):
+            return "tz1SRC"
+
+    oph = tezos.delegate_to_baker(
+        "https://rpc.example",
+        _Key(),
+        "tz1NEW",
+        fee_mutez=500,
+        gas_limit=1000,
+        storage_limit=0,
+    )
+    assert oph == "op_safe"
+
+    fill_calls = [c[1] for c in recorder if c[0] == "fill"]
+    assert fill_calls
+    assert any(c.get("fee") == 15000 for c in fill_calls)
+    assert any(c.get("gas_limit") == 120000 for c in fill_calls)
+
+    inject_calls = [c[1] for c in recorder if c[0] == "inject"]
+    assert inject_calls
+    assert inject_calls[-1].get("gas_limit") == 120000
+    assert inject_calls[-1].get("fee") == 15000
+
+
+def test_estimate_delegation_uses_high_profile_when_stake_context_detected(monkeypatch):
+    monkeypatch.setattr(tezos, "is_revealed", lambda rpc, addr: True)
+    monkeypatch.setattr(
+        tezos,
+        "get_wallet_chain_state",
+        lambda rpc, addr, force_refresh=False, prefer_rpc=True: {
+            "staked_mutez": 5_000_000,
+            "unstaked_mutez": 0,
+            "staking_active": True,
+        },
+    )
+
+    est = tezos.estimate_delegation("https://rpc.example", "tz1SRC", "tz1NEW")
+    assert est["tx"]["fee_mutez"] == 8000
+    assert est["tx"]["gas_limit"] == 30000
+    assert est["fee_options"]["priority"]["gas_limit"] == 60000
+
+
+def test_estimate_delegation_keeps_low_profile_without_stake_context(monkeypatch):
+    monkeypatch.setattr(tezos, "is_revealed", lambda rpc, addr: True)
+    monkeypatch.setattr(
+        tezos,
+        "get_wallet_chain_state",
+        lambda rpc, addr, force_refresh=False, prefer_rpc=True: {
+            "staked_mutez": 0,
+            "unstaked_mutez": 0,
+            "staking_active": False,
+        },
+    )
+
+    est = tezos.estimate_delegation("https://rpc.example", "tz1SRC", "tz1NEW")
+    assert est["tx"]["fee_mutez"] == 800
+    assert est["tx"]["gas_limit"] == 1000

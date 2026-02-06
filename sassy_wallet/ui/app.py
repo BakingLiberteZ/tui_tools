@@ -9936,7 +9936,14 @@ class WalletApp(App):
                 return fn(*args, **kwargs)
         except (AttributeError, RuntimeError, TypeError) as e:
             log_error("Failed to check thread ID in _ui", exception=e)
-        return self.call_from_thread(fn, *args, **kwargs)
+        try:
+            return self.call_from_thread(fn, *args, **kwargs)
+        except RuntimeError as e:
+            # Late callbacks may fire while the app is shutting down.
+            if "app is not running" in str(e).lower():
+                log_debug("Skipping late UI callback because app is not running", exception=str(e))
+                return None
+            raise
 
     # -------------------------
     # Spinner
@@ -13299,8 +13306,8 @@ class WalletApp(App):
                                 exception=retry_e,
                                 rpc=target_rpc,
                             )
-                            safe_fee = max(int(fee_mutez or 0), 10_000)
-                            safe_gas = max(int(gas_limit or 0), 30_000)
+                            safe_fee = max(int(fee_mutez or 0), 15_000)
+                            safe_gas = max(int(gas_limit or 0), 120_000)
                             return delegate_to_baker(
                                 target_rpc,
                                 key,
