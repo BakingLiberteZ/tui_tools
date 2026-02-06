@@ -11272,23 +11272,22 @@ class WalletApp(App):
         cp = it.get("counterparty") or "?"
 
         amt_formatted = format_xtz(amt)
-        history_yellow = "#d4a857"
         if direction == "IN":
-            amt_str = f"[{history_yellow}]{f'+{amt_formatted} XTZ':<15}[/{history_yellow}]"
+            amt_str = f"[#4bbf95]{f'+{amt_formatted} XTZ':<15}[/#4bbf95]"
         elif direction == "OUT":
-            amt_str = f"[{history_yellow}]{f'-{amt_formatted} XTZ':<15}[/{history_yellow}]"
+            amt_str = f"[red]{f'-{amt_formatted} XTZ':<15}[/red]"
         elif direction == "STK":
-            amt_str = f"[{history_yellow}]{f'+{amt_formatted} XTZ':<15}[/{history_yellow}]"
+            amt_str = f"[#7b6cc4]{f'+{amt_formatted} XTZ':<15}[/#7b6cc4]"
         elif direction == "UST":
-            amt_str = f"[{history_yellow}]{f'-{amt_formatted} XTZ':<15}[/{history_yellow}]"
+            amt_str = f"[#7b6cc4]{f'-{amt_formatted} XTZ':<15}[/#7b6cc4]"
         elif direction == "DEL":
-            amt_str = f"[{history_yellow}]{f'---':<15}[/{history_yellow}]"
+            amt_str = f"[#d4a857]{f'---':<15}[/#d4a857]"
         elif direction == "UND":
-            amt_str = f"[{history_yellow}]{f'---':<15}[/{history_yellow}]"
+            amt_str = f"[#d4a857]{f'---':<15}[/#d4a857]"
         elif direction == "BAK":
-            amt_str = f"[{history_yellow}]{f'---':<15}[/{history_yellow}]"
+            amt_str = f"[#d4a857]{f'---':<15}[/#d4a857]"
         else:
-            amt_str = f"[{history_yellow}]{f'{amt_formatted} XTZ':<15}[/{history_yellow}]"
+            amt_str = f"{f'{amt_formatted} XTZ':<15}"
 
         kind = (it.get("kind") or "").lower()
         entrypoint = (it.get("entrypoint") or "").lower()
@@ -11303,7 +11302,12 @@ class WalletApp(App):
         else:
             type_raw = "TX"
 
-        type_text = f"[{history_yellow}]{type_raw:<4}[/{history_yellow}]"
+        if type_raw in ("DLG", "CH"):
+            type_text = f"[#d4a857]{type_raw:<4}[/#d4a857]"
+        elif type_raw in ("STK", "USTK"):
+            type_text = f"[#7b6cc4]{type_raw:<4}[/#7b6cc4]"
+        else:
+            type_text = f"{type_raw:<4}"
 
         if len(cp) > 23:
             cp_display = (cp[:11] + "…" + cp[-11:])
@@ -11356,11 +11360,24 @@ class WalletApp(App):
             else:
                 status_label = "TX BAKED"
 
+        if status == "FAILED":
+            status_color = "red"
+        elif status == "PROCESSING":
+            status_color = "yellow"
+        elif direction in ("STK", "UST"):
+            status_color = "#7b6cc4"
+        elif direction in ("DEL", "UND"):
+            status_color = "yellow"
+        elif direction in ("IN", "OUT"):
+            status_color = "dim"
+        else:
+            status_color = "green"
+
         if status in ("PENDING", "PROCESSING"):
             shimmer = shimmer_text(status_label, self._pending_shimmer_i, span=2, pingpong=True)
-            status_text = f"[{history_yellow}]{shimmer}{' ' * max(0, 10 - len(status_label))}[/{history_yellow}]"
+            status_text = f"{shimmer}{' ' * max(0, 10 - len(status_label))}"
         else:
-            status_text = f"[{history_yellow}]{status_label:<10}[/{history_yellow}]"
+            status_text = f"[{status_color}]{status_label:<10}[/{status_color}]"
 
         idx_text = f"{idx:<3}"
         return f"{idx_text} {ts_padded}  {type_text}  {amt_str}  {cp_display}  {status_text}"
