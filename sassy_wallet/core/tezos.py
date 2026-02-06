@@ -404,6 +404,7 @@ def get_wallet_chain_state_rpc(
             "delegate": Optional[str],
             "balance_mutez": int,
             "staked_mutez": int,
+            "unstaked_mutez": int,
             "staking_active": Optional[bool],  # None if RPC doesn't expose staking fields
         }
     """
@@ -441,6 +442,7 @@ def get_wallet_chain_state_rpc(
         "delegate": delegate,
         "balance_mutez": int(balance or 0),
         "staked_mutez": int(staked or 0),
+        "unstaked_mutez": int(unstaked or 0),
         "staking_active": staking_active,
     }
 
@@ -597,6 +599,7 @@ def _get_wallet_chain_state_tzkt(rpc: str, address: str, *, force_refresh: bool 
         "delegate": delegate,
         "balance_mutez": balance,
         "staked_mutez": staked,
+        "unstaked_mutez": stake_related,
         "staking_active": staking_active,
     }
 
@@ -634,6 +637,8 @@ def get_wallet_chain_state(
         # Prefer RPC staked if we managed to read it (even if 0).
         if rpc_state.get("staked_mutez") is not None:
             merged["staked_mutez"] = rpc_state["staked_mutez"]
+        if rpc_state.get("unstaked_mutez") is not None:
+            merged["unstaked_mutez"] = rpc_state["unstaked_mutez"]
         return merged
 
     return rpc_state

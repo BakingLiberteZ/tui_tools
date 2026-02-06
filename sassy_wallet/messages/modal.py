@@ -57,7 +57,7 @@ SEND_PASSPHRASE_MESSAGES = [
     "🎫 Ticket to send! Show your boarding pass!",
     "👮 Bread police here! Identify yourself!",
     "🎪 Behind the curtain! Whisper the secret password!",
-    "🧙 Wizard's spell required! Cast your passphrase!",
+    "🧙 Wizard's spell required! Cast your password!",
 ]
 
 # Confirm Modal Messages
@@ -138,7 +138,7 @@ PASSPHRASE_PROMPT_MESSAGES = [
     "🔐 Vault code! Only you should know this!",
     "🗝️ Forge your key! Make it unbreakable!",
     "🎰 Combo lock! Spin those tumblers!",
-    "🧙 Wizard's spell! Create your magic words!",
+    "🧙 Wizard's spell! Create your magic password!",
     "👮 Security badge! Password protection enabled!",
     "🎪 Backstage pass! Set the secret code!",
     "💪 Flex those password muscles! Make it tough!",

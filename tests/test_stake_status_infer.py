@@ -61,5 +61,5 @@ def test_get_wallet_chain_state_marks_staking_active_when_unstaked_balance_prese
     state = tezos.get_wallet_chain_state(rpc, addr, force_refresh=True)
     assert state["delegate"] == "tz1DELEGATE"
     assert state["staked_mutez"] == 0
+    assert state["unstaked_mutez"] == 42
     assert state["staking_active"] is True
-

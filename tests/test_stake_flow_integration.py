@@ -131,6 +131,51 @@ def test_stake_flow_ignores_overlapping_submit_attempts():
     assert dismissed_payloads[0]["action"] == "stake"
 
 
+def test_stake_flow_blocks_when_pending_unstake_exists_after_baker_change():
+    """Stake should stop early when unstake is pending from a recent baker change."""
+    account = Account(
+        name="Primary",
+        address="tz1SOURCE11111111111111111111111111111",
+        enc=None,
+    )
+    screen = StakeScreen(accounts=[account], rpc="https://rpc.tzkt.io/mainnet")
+    screen.selected_account = account
+    screen.balance_xtz = Decimal("10")
+    screen.is_delegated = True
+    screen.staked_mutez = 0
+    screen.unstaked_mutez = 2_500_000
+
+    shown_errors: list[str] = []
+    confirm_calls: list[Decimal] = []
+
+    async def _refresh_selected_chain_state(force_refresh=False, preserve_input=False):
+        return True
+
+    async def _confirm_pending_ops_or_abort(*, cancel_message: str, detailed: bool = False) -> bool:
+        return True
+
+    async def _confirm_stake_flow(*, amount, cancel_message, confirm_screen_factory):
+        confirm_calls.append(amount)
+        return object(), {"fee_mutez": 1234, "gas_limit": 2222, "storage_limit": 0}
+
+    def _show_error(message: str):
+        shown_errors.append(message)
+
+    screen._refresh_selected_chain_state = _refresh_selected_chain_state
+    screen._has_outgoing_activity = lambda address: True
+    screen._read_validated_amount = lambda **kwargs: Decimal("1")
+    screen._confirm_pending_ops_or_abort = _confirm_pending_ops_or_abort
+    screen._confirm_stake_flow = _confirm_stake_flow
+    screen._dismiss_stake_action = lambda *args, **kwargs: None
+    screen._show_error = _show_error
+
+    asyncio.run(screen.stake_pressed())
+
+    assert confirm_calls == []
+    assert shown_errors
+    assert "Pending unstake detected" in shown_errors[0]
+
+
 def test_action_stake_runs_in_dedicated_worker_group():
     """Regression: stake flow worker must not share the default worker group."""
     class Dummy:

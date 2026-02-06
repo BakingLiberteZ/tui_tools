@@ -5025,6 +5025,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         self.balance_xtz: Decimal = Decimal(0)
         self.delegate_addr: Optional[str] = None
         self.staked_mutez: int = 0
+        self.unstaked_mutez: int = 0
         self.staking_active: bool = False
         self.is_delegated: bool = False
         self._delegation_pending: bool = False
@@ -5194,6 +5195,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 )
                 delegate_addr = state.get("delegate")
                 staked_mutez = int(state.get("staked_mutez") or 0)
+                unstaked_mutez = int(state.get("unstaked_mutez") or 0)
                 staking_active = bool(state.get("staking_active"))
                 balance_mutez = int(state.get("balance_mutez") or 0)
                 if balance_mutez <= 0:
@@ -5204,7 +5206,12 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 now_ts = time.time()
                 prev_staked = int(prev.get("staked_mutez") or 0)
                 prev_seen = prev.get("staked_seen_at")
-                if prev_staked > 0 and staked_mutez == 0 and isinstance(prev_seen, (int, float)):
+                if (
+                    prev_staked > 0
+                    and staked_mutez == 0
+                    and unstaked_mutez <= 0
+                    and isinstance(prev_seen, (int, float))
+                ):
                     if now_ts - float(prev_seen) < self._stake_status_grace_seconds:
                         staked_mutez = prev_staked
                         staking_active = True
@@ -5213,6 +5220,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 self._wallet_info_cache[acc.address] = {
                     "delegate_addr": delegate_addr,
                     "staked_mutez": staked_mutez,
+                    "unstaked_mutez": unstaked_mutez,
                     "staking_active": staking_active,
                     "balance_mutez": balance_mutez,
                     "fetched_at": time.time(),
@@ -5333,6 +5341,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 self.balance_xtz = mutez_to_xtz(cached_info["balance_mutez"])
                 self.delegate_addr = cached_info["delegate_addr"]
                 self.staked_mutez = cached_info["staked_mutez"]
+                self.unstaked_mutez = int(cached_info.get("unstaked_mutez") or 0)
                 self.staking_active = bool(cached_info.get("staking_active")) or self.staked_mutez > 0
                 self.is_delegated = bool(self.delegate_addr)
             else:
@@ -5347,6 +5356,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 self.balance_xtz = mutez_to_xtz(balance_mutez)
                 self.delegate_addr = state.get("delegate")
                 self.staked_mutez = int(state.get("staked_mutez") or 0)
+                self.unstaked_mutez = int(state.get("unstaked_mutez") or 0)
                 self.staking_active = bool(state.get("staking_active")) or self.staked_mutez > 0
                 self.is_delegated = bool(self.delegate_addr)
 
@@ -5371,6 +5381,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         self.balance_xtz = Decimal(0)
         self.delegate_addr = None
         self.staked_mutez = 0
+        self.unstaked_mutez = 0
         self.staking_active = False
         self.is_delegated = False
         self._delegation_pending = False
@@ -5478,6 +5489,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             addr = self.selected_account.address
 
             available_xtz = format_xtz(self.balance_xtz)
+            unstaked_xtz = format_xtz(mutez_to_xtz(self.unstaked_mutez))
 
             delegate_label = "[dim]Not delegated[/dim]"
             if self.is_delegated and self.delegate_addr:
@@ -5504,6 +5516,10 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     f"[cyan]Available[/cyan] {available_xtz} XTZ   [#8b5cf6]Staked[/#8b5cf6] {staked_xtz} XTZ",
                     f"[yellow]Delegated to[/yellow] {delegate_label}",
                 ]
+                if self.unstaked_mutez > 0:
+                    info_lines.append(
+                        f"[yellow]Pending unstake[/yellow] {unstaked_xtz} XTZ (must finalize before new stake)"
+                    )
 
             info_text = "\n".join(info_lines)
             info_widget.update(info_text)
@@ -5543,7 +5559,13 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 input_label.update("[b]Enter Amount (XTZ):[/b]")
                 input_field.placeholder = "Example: 10.5"
                 input_field.disabled = False
-                input_hint.update("")
+                if self.unstaked_mutez > 0 and self.staked_mutez <= 0:
+                    input_hint.update(
+                        "[yellow]⏳ Pending unstake detected after baker change. "
+                        "You can stake again after finalization (~4 cycles).[/yellow]"
+                    )
+                else:
+                    input_hint.update("")
                 self.query_one("#amount_comment", Static).update("")
 
             # Update buttons - simplified show/hide approach
@@ -5570,6 +5592,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     change_baker_btn.display = False
 
                     # Show/configure buttons based on state
+                    stake_locked_by_pending_unstake = self.unstaked_mutez > 0 and self.staked_mutez <= 0
+
                     if self._delegation_pending:
                         # Delegation pending
                         delegate_btn.display = True
@@ -5601,7 +5625,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                         change_baker_btn.label = "Change Baker"
 
                         stake_btn.display = True
-                        stake_btn.disabled = False
+                        stake_btn.disabled = stake_locked_by_pending_unstake
                         unstake_btn.display = True
                         unstake_btn.disabled = False
                     else:
@@ -5611,7 +5635,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                         change_baker_btn.label = "Change Baker"
 
                         stake_btn.display = True
-                        stake_btn.disabled = False
+                        stake_btn.disabled = stake_locked_by_pending_unstake
 
                 except _UI_QUERY_EXCEPTIONS as e:
                     log_error("Failed to update buttons", exception=e)
@@ -5751,13 +5775,19 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             delegate_addr = state.get("delegate")
             balance_mutez = int(state.get("balance_mutez") or 0)
             staked_mutez = int(state.get("staked_mutez") or 0)
+            unstaked_mutez = int(state.get("unstaked_mutez") or 0)
             staking_active = bool(state.get("staking_active")) or (staked_mutez > 0)
         except _FLOW_TASK_EXCEPTIONS as e:
             log_debug("Failed to refresh wallet chain state", exception=str(e), address=addr)
             return False
 
         # If stake recently existed, don't immediately downgrade to 0 (TzKT can lag right after a baker change).
-        if prev_staked > 0 and staked_mutez == 0 and isinstance(prev_seen, (int, float)):
+        if (
+            prev_staked > 0
+            and staked_mutez == 0
+            and unstaked_mutez <= 0
+            and isinstance(prev_seen, (int, float))
+        ):
             if now_ts - float(prev_seen) < self._stake_status_grace_seconds:
                 staked_mutez = prev_staked
                 staking_active = True
@@ -5765,11 +5795,13 @@ class StakeScreen(ModalScreen[Optional[dict]]):
         self.delegate_addr = delegate_addr
         self.is_delegated = bool(delegate_addr)
         self.staked_mutez = staked_mutez
+        self.unstaked_mutez = unstaked_mutez
         self.staking_active = staking_active
         self.balance_xtz = mutez_to_xtz(balance_mutez)
         self._wallet_info_cache[addr] = {
             "delegate_addr": delegate_addr,
             "staked_mutez": staked_mutez,
+            "unstaked_mutez": unstaked_mutez,
             "staking_active": staking_active,
             "balance_mutez": balance_mutez,
             "fetched_at": now_ts,
@@ -5957,6 +5989,13 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             await self._refresh_selected_chain_state(force_refresh=True, preserve_input=True)
             if not self.is_delegated:
                 self._show_error("⚠️ Wallet is not delegated. Delegate (or change baker) first.")
+                return
+            if self.unstaked_mutez > 0 and self.staked_mutez <= 0:
+                pending_unstake = format_xtz(mutez_to_xtz(self.unstaked_mutez))
+                self._show_error(
+                    f"⚠️ Pending unstake detected ({pending_unstake} XTZ). "
+                    "After changing baker, stake is temporarily locked until finalization (~4 cycles)."
+                )
                 return
 
             has_outgoing = self._has_outgoing_activity(self.selected_account.address)
@@ -6195,7 +6234,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                     placeholder="Your wallet encryption password",
                     wallet_info=f"[b cyan]Wallet:[/b cyan] {self.selected_account.name}",
                     ok_label="Next →",
-                    fun_note="Keep your keys safe. Never share this passphrase. 🔐🥖",
+                    fun_note="Keep your keys safe. Never share this encryption password. 🔐🥖",
                     show_back_button=True,
                     error_note=error_note,
                 ),
@@ -6308,7 +6347,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 secret_key = decrypt_secret(self.selected_account.enc, pw)
                 key = key_from_encoded_secret(secret_key)
             except InvalidTag:
-                error_note = "❌ Wrong passphrase. Try again."
+                error_note = "❌ Wrong encryption password. Try again."
                 continue
             except (ValueError, TypeError) as decrypt_err:
                 raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
@@ -6345,7 +6384,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             try:
                 return decrypt_secret(self.selected_account.enc, passphrase)
             except InvalidTag:
-                error_note = "❌ Wrong passphrase. Try again."
+                error_note = "❌ Wrong encryption password. Try again."
                 continue
             except (ValueError, TypeError) as decrypt_err:
                 raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
@@ -6506,7 +6545,7 @@ class StakeScreen(ModalScreen[Optional[dict]]):
             secret_key = await self._prompt_operation_secret(
                 ok_label="💎 Stake!",
                 fun_note="Time to become a CHAD! Lock in that XTZ! 💪🔥",
-                cancel_status="[yellow]⏸️ Staking cancelled - passphrase not provided[/yellow]",
+                cancel_status="[yellow]⏸️ Staking cancelled - encryption password not provided[/yellow]",
             )
             if not secret_key:
                 return
@@ -7783,6 +7822,8 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
                 f"[b yellow]Current:[/b yellow]   {self._current_baker_label}",
                 "",
                 f"[b yellow]New:[/b yellow]       {self._new_baker_label}",
+                "",
+                "[dim]Note:[/dim] Existing staked tez moves to unstaking until finalization.",
             ]
         elif err:
             lines = [
@@ -7796,6 +7837,8 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
                 "",
                 f"[red]Fee estimate failed:[/red] {err}",
                 "",
+                "[dim]Note:[/dim] Existing staked tez moves to unstaking until finalization.",
+                "",
                 "You can still CHANGE BAKER (autofill) or use Advanced overrides.",
             ]
         else:
@@ -7807,6 +7850,8 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
                 f"[b yellow]Current:[/b yellow]   {self._current_baker_label}",
                 "",
                 f"[b yellow]New:[/b yellow]       {self._new_baker_label}",
+                "",
+                "[dim]Note:[/dim] Existing staked tez moves to unstaking until finalization.",
             ]
 
         self.query_one("#summary", Static).update("\n".join(lines))
@@ -8291,7 +8336,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
             except _CRYPTO_DECODE_EXCEPTIONS as e:
                 log_error("Failed to decrypt secret key", exception=e)
                 if isinstance(e, InvalidTag):
-                    error_note = "❌ Wrong passphrase. Try again."
+                    error_note = "❌ Wrong encryption password. Try again."
                 else:
                     error_note = f"❌ Decrypt key failed: {e}"
                 continue
@@ -12271,6 +12316,24 @@ class WalletApp(App):
             has_key=bool(stake_data.get("key")),
             amount=str(amount),
         )
+        try:
+            state = await asyncio.to_thread(
+                get_wallet_chain_state,
+                self.rpc,
+                account.address,
+                force_refresh=True,
+                prefer_rpc=True,
+            )
+            pending_unstaked_mutez = int(state.get("unstaked_mutez") or 0)
+            staked_mutez = int(state.get("staked_mutez") or 0)
+            if pending_unstaked_mutez > 0 and staked_mutez <= 0:
+                pending_unstake = format_xtz(mutez_to_xtz(pending_unstaked_mutez))
+                self._set_status(
+                    f"⚠️ Cannot stake yet. Pending unstake ({pending_unstake} XTZ) must finalize first (~4 cycles)."
+                )
+                return
+        except _FLOW_PRECHECK_EXCEPTIONS as e:
+            log_warning("Failed to preflight unstaked balance before staking", exception=e, address=account.address)
 
         breathing_started = False
         watchdog_token = None
@@ -12291,7 +12354,7 @@ class WalletApp(App):
                             placeholder="Your wallet encryption password",
                             wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
                             ok_label="Next →",
-                            fun_note="Keep your keys safe. Never share this passphrase. 🔐🥖",
+                            fun_note="Keep your keys safe. Never share this encryption password. 🔐🥖",
                             show_back_button=True,
                             error_note=error_note,
                         )
@@ -12316,7 +12379,7 @@ class WalletApp(App):
                     try:
                         secret_key = decrypt_secret(account.enc, passphrase)
                     except InvalidTag:
-                        error_note = "❌ Wrong passphrase. Try again."
+                        error_note = "❌ Wrong encryption password. Try again."
                         continue
                     except (ValueError, TypeError) as decrypt_err:
                         raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
@@ -12605,7 +12668,7 @@ class WalletApp(App):
                             placeholder="Your wallet encryption password",
                             wallet_info=f"[b cyan]Wallet:[/b cyan] {account.name}",
                             ok_label="Next →",
-                            fun_note="Keep your keys safe. Never share this passphrase. 🔐🥖",
+                            fun_note="Keep your keys safe. Never share this encryption password. 🔐🥖",
                             show_back_button=True,
                             error_note=error_note,
                         )
@@ -12627,7 +12690,7 @@ class WalletApp(App):
                     try:
                         secret_key = decrypt_secret(account.enc, passphrase)
                     except InvalidTag:
-                        error_note = "❌ Wrong passphrase. Try again."
+                        error_note = "❌ Wrong encryption password. Try again."
                         continue
                     except (ValueError, TypeError) as decrypt_err:
                         raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
@@ -12918,7 +12981,7 @@ class WalletApp(App):
                     secret_key = decrypt_secret(account.enc, passphrase)
                     key = key_from_encoded_secret(secret_key)
                 except InvalidTag:
-                    error_note = "❌ Wrong passphrase. Try again."
+                    error_note = "❌ Wrong encryption password. Try again."
                     continue
                 except (ValueError, TypeError) as decrypt_err:
                     raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
@@ -13099,6 +13162,7 @@ class WalletApp(App):
         account = stake_data.get("account")
         new_baker_address = stake_data.get("baker_address")
         current_baker_address = stake_data.get("current_baker") or ""
+        pre_change_staked_mutez = 0
 
         if not account or not new_baker_address:
             log_error("Invalid change_baker data received", stake_data=stake_data)
@@ -13115,6 +13179,7 @@ class WalletApp(App):
                 prefer_rpc=True,
             )
             chain_current = state.get("delegate") or ""
+            pre_change_staked_mutez = int(state.get("staked_mutez") or 0)
             if chain_current:
                 current_baker_address = chain_current
         except _FLOW_PRECHECK_EXCEPTIONS as e:
@@ -13159,7 +13224,7 @@ class WalletApp(App):
                     secret_key = decrypt_secret(account.enc, passphrase)
                     key = key_from_encoded_secret(secret_key)
                 except InvalidTag:
-                    error_note = "❌ Wrong passphrase. Try again."
+                    error_note = "❌ Wrong encryption password. Try again."
                     continue
                 except (ValueError, TypeError) as decrypt_err:
                     raise RuntimeError("Malformed encrypted wallet data") from decrypt_err
@@ -13393,12 +13458,33 @@ class WalletApp(App):
             thread=True,
         )
 
-        self._ui(self._set_status, "⏳ Baker change submitted - waiting for inclusion...", force=True)
+        # Fast local cache hint for StakeScreen reopen: after changing baker, existing stake
+        # transitions to unstaking and cannot be re-staked until finalization.
+        if pre_change_staked_mutez > 0:
+            cached = self._stake_wallet_info_cache.get(account.address) or {}
+            cached["delegate_addr"] = new_baker_address
+            cached["staked_mutez"] = 0
+            cached["unstaked_mutez"] = max(int(cached.get("unstaked_mutez") or 0), pre_change_staked_mutez)
+            cached["staking_active"] = True
+            cached["fetched_at"] = time.time()
+            self._stake_wallet_info_cache[account.address] = cached
+
+        self._ui(
+            self._set_status,
+            "⏳ Baker change submitted. Previous stake (if any) is now unstaking until finalization...",
+            force=True,
+        )
 
         def _finish_change_baker_status() -> None:
             self._stop_breathing_effect()
             self._set_busy(False)
-            self._set_status_styled_locked("✅ Baker changed. Fresh oven, fresh rewards.", style="warning")
+            if pre_change_staked_mutez > 0:
+                self._set_status_styled_locked(
+                    "✅ Baker changed. Previous stake is now unstaking; restake after finalization.",
+                    style="warning",
+                )
+            else:
+                self._set_status_styled_locked("✅ Baker changed. Fresh oven, fresh rewards.", style="warning")
 
         self._ui(self._schedule_after, remaining, _finish_change_baker_status)
         self._ui(

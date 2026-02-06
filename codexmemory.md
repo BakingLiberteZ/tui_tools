@@ -95,7 +95,7 @@
 
 ## Current Validation Baseline
 
-- `pytest -q`: passing (`52 passed, 1 skipped` in latest run).
+- `pytest -q`: passing (`53 passed, 1 skipped` in latest run).
 - `bandit -r sassy_wallet -ll -ii`: clean.
 - `scripts/check_dependency_policy.py`: passing.
 - `pip-audit` full online query depends on network availability; enforced in CI `security-audit.yml`.
@@ -105,6 +105,40 @@
 - Fixed a stake-flow reliability regression where the stake modal could be left without an active owner worker and the payload was not dispatched.
 - `WalletApp.action_stake()` now starts `_run_stake_flow` in a dedicated worker group (`stake-flow`) to avoid cancellation collisions with unrelated exclusive workers.
 - `StakeScreen.stake_pressed()` now has an in-screen reentry guard to prevent overlapping submits from event/key bounce while confirmation is still in progress.
+
+## Change Baker/Staking Semantics Hardening (2026-02-06)
+
+- Audited against Tezos docs and aligned UX with protocol semantics:
+- Changing baker is a `delegation` operation.
+- If wallet has staked tez, changing delegate transitions that stake into unstaking/frozen state and it must finalize before new stake with the new delegate.
+
+- Implementation updates:
+- Chain-state snapshots now carry `unstaked_mutez` (RPC + TzKT paths).
+- Stake UI now surfaces pending-unstake state and blocks stake submit when unstake-from-baker-change is still pending.
+- Change-baker confirm/status copy now explicitly warns about implicit unstake/finalization delay.
+- Wallet-info cache grace fallback no longer preserves stale staked balance when unstaked balance is present.
+
+- Added regression coverage:
+- `tests/test_stake_flow_integration.py::test_stake_flow_blocks_when_pending_unstake_exists_after_baker_change`
+- `tests/test_stake_status_infer.py::test_get_wallet_chain_state_marks_staking_active_when_unstaked_balance_present` now asserts `unstaked_mutez`.
+
+## Manual QA Playbook (2026-02-06)
+
+- Added guided checklist for interactive validation:
+- `QA_CHANGE_BAKER.md`
+- Covers:
+- change baker with/without active stake
+- immediate post-change stake lock expectations
+- same-baker no-op guard
+- cancel/back safety
+- copy consistency checks in encryption password modals
+
+## Copy Consistency (Encryption Password)
+
+- User-visible messages in `Enter Your Encryption Password` modals were normalized:
+- `Wrong passphrase` -> `Wrong encryption password`
+- `Never share this passphrase` -> `Never share this encryption password`
+- Staking cancel reason now references `encryption password` instead of `passphrase`.
 
 ## Key Commits (Recent)
 
