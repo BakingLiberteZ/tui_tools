@@ -57,8 +57,8 @@ def write_private_text_atomic(path: Path, payload: str) -> None:
     try:
         try:
             os.fchmod(fd, _PRIVATE_FILE_MODE)
-        except (AttributeError, OSError, PermissionError):
-            pass
+        except (AttributeError, OSError, PermissionError) as e:
+            log_debug("Failed to fchmod temporary store file", exception=str(e), path=str(tmp_path))
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.flush()
@@ -69,8 +69,8 @@ def write_private_text_atomic(path: Path, payload: str) -> None:
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
-            except _STORE_IO_EXCEPTIONS:
-                pass
+            except _STORE_IO_EXCEPTIONS as e:
+                log_debug("Failed to cleanup temporary store file", exception=str(e), path=str(tmp_path))
 
 
 def write_private_json_atomic(
@@ -273,7 +273,16 @@ def list_accounts(data: Dict[str, Any]) -> List[Account]:
             Account(
                 name=a.get("name", "Unnamed"),
                 address=a.get("address", ""),
-                enc=EncryptedBlob(**enc) if enc else None,
+                enc=EncryptedBlob(
+                    salt_b64=enc["salt_b64"],
+                    nonce_b64=enc["nonce_b64"],
+                    ct_b64=enc["ct_b64"],
+                    kdf_n=(
+                        enc.get("kdf_n")
+                        if isinstance(enc.get("kdf_n"), int) and not isinstance(enc.get("kdf_n"), bool)
+                        else None
+                    ),
+                ) if enc else None,
             )
         )
     return out
@@ -324,6 +333,8 @@ def _to_dict(acct: Account) -> Dict[str, Any]:
             "nonce_b64": acct.enc.nonce_b64,
             "ct_b64": getattr(acct.enc, "ct_b64", None),
         }
+        if isinstance(getattr(acct.enc, "kdf_n", None), int) and not isinstance(getattr(acct.enc, "kdf_n"), bool):
+            d["enc"]["kdf_n"] = getattr(acct.enc, "kdf_n")
 
         if not d["enc"]["ct_b64"] and hasattr(acct.enc, "ctt_b64"):
             d["enc"]["ct_b64"] = getattr(acct.enc, "ctt_b64")

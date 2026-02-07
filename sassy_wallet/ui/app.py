@@ -3462,6 +3462,11 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
                     salt_b64=blob_dict.get("salt_b64", ""),
                     nonce_b64=blob_dict.get("nonce_b64", ""),
                     ct_b64=blob_dict.get("ct_b64", ""),
+                    kdf_n=(
+                        blob_dict.get("kdf_n")
+                        if isinstance(blob_dict.get("kdf_n"), int) and not isinstance(blob_dict.get("kdf_n"), bool)
+                        else None
+                    ),
                 )
                 payload_json = decrypt_secret(blob, passphrase)
                 if len(payload_json.encode("utf-8")) > Config.BACKUP_MAX_DECRYPTED_BYTES:
@@ -5984,8 +5989,8 @@ class StakeScreen(ModalScreen[Optional[dict]]):
                 self.query_one("#input_hint", Static).update(
                     "[red]✗ 🍳 Already cooking with this baker. Choose a new one for a real change.[/red]"
                 )
-            except _UI_QUERY_EXCEPTIONS:
-                pass
+            except _UI_QUERY_EXCEPTIONS as e:
+                log_debug("Failed to update same-baker hint", exception=str(e))
             return
 
         if not await self._confirm_pending_ops_or_abort(
@@ -7919,8 +7924,8 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
             toggle_btn = self.query_one("#toggle", Button)
             toggle_btn.disabled = True
             _set_widget_display(toggle_btn, False)
-        except _UI_QUERY_EXCEPTIONS:
-            pass
+        except _UI_QUERY_EXCEPTIONS as e:
+            log_debug("Failed to hide advanced toggle button in change-baker screen", exception=str(e))
         try:
             adv = self.query_one("#advanced", Vertical)
             _set_widget_display(adv, False)
@@ -7928,8 +7933,8 @@ class ConfirmChangeBakerScreen(ConfirmDelegateScreen):
             _set_widget_display(suggested_widget, False)
             joke_widget = self.query_one("#advanced_joke", Static)
             _set_widget_display(joke_widget, False)
-        except _UI_QUERY_EXCEPTIONS:
-            pass
+        except _UI_QUERY_EXCEPTIONS as e:
+            log_debug("Failed to hide advanced controls in change-baker screen", exception=str(e))
 
     def _render_summary(self, estimating: bool = False, err: str = "") -> None:
         net = network_from_rpc(self.rpc)
@@ -13936,6 +13941,7 @@ class WalletApp(App):
                     "salt_b64": blob.salt_b64,
                     "nonce_b64": blob.nonce_b64,
                     "ct_b64": blob.ct_b64,
+                    "kdf_n": blob.kdf_n,
                 },
             }
 
@@ -14171,6 +14177,11 @@ class WalletApp(App):
                         salt_b64=blob_dict.get("salt_b64", ""),
                         nonce_b64=blob_dict.get("nonce_b64", ""),
                         ct_b64=blob_dict.get("ct_b64", ""),
+                        kdf_n=(
+                            blob_dict.get("kdf_n")
+                            if isinstance(blob_dict.get("kdf_n"), int) and not isinstance(blob_dict.get("kdf_n"), bool)
+                            else None
+                        ),
                     )
                     payload_json = decrypt_secret(blob, passphrase)
                     if len(payload_json.encode("utf-8")) > Config.BACKUP_MAX_DECRYPTED_BYTES:
@@ -14402,6 +14413,11 @@ class WalletApp(App):
                 salt_b64=enc["salt_b64"],
                 nonce_b64=enc["nonce_b64"],
                 ct_b64=enc["ct_b64"],
+                kdf_n=(
+                    enc.get("kdf_n")
+                    if isinstance(enc.get("kdf_n"), int) and not isinstance(enc.get("kdf_n"), bool)
+                    else None
+                ),
             )
         except (TypeError, ValueError, KeyError) as e:
             log_error("Failed to parse encrypted wallet payload from backup", exception=e)
