@@ -12,8 +12,10 @@ A terminal wallet that **doesn’t hide the knobs**. You learn Tezos by doing Te
 - **Bulk backup / restore** with passphrase encryption (AES-256-GCM + scrypt)
 - **Send XTZ** with fee/gas controls and sane warnings
 - **Receive** with quick copy and multi-wallet selector
-- **Delegate / Stake / Unstake** with dedicated flows (Stake HQ)
-- **Wallet status + history** with bakers, staking, and delegation info
+- **Delegate / Change Baker / Stake / Unstake** with dedicated flows (Stake HQ)
+- **Wallet status + history** with baker aliases, staking, and delegation info
+- **History reliability hardening** for staking/unstaking and mixed operation timelines
+- **Operation Summary panel** with direct TzKT links per operation
 - **RPC + network switching** with friendly status feedback
 - **Sassy commentary** that keeps you humble ¬_¬
 
@@ -48,18 +50,9 @@ uv run pip-audit -l --ignore-vuln CVE-2024-23342
 
 - Security policy and reporting workflow: `SECURITY.md`
 
-## V2 ideas (wishlist)
-
-- Hardware wallet support
-- Smarter tx indexing + cleaner history UX
-- Bulk operations (send/undelegate/stake)
-- Safer key handling UX + recovery helpers
-- UI themes + custom keybindings
-
 ## Missing features
 
-- Un-delegation button: not our problem. We build tools for stakers, not waverers.
-- Switching baker for stake: not baked yet.
+- **Unstake Requests** lifecycle management (track, inspect, and finalize pending requests): **pending**
 
 ## Why this exists
 

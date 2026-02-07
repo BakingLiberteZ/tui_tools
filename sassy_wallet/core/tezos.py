@@ -1356,6 +1356,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             if not baker_addr:
                 baker_addr = get_delegation_info(rpc, address) or ""
             counterparty = _format_baker_label(rpc, baker_addr)
+            counterparty_address = baker_addr
             baker_label = counterparty
         elif sender == address and (entrypoint == "unstake" or op_type == "unstake"):
             direction = "UST"
@@ -1363,23 +1364,29 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             if not baker_addr:
                 baker_addr = get_delegation_info(rpc, address) or ""
             counterparty = _format_baker_label(rpc, baker_addr)
+            counterparty_address = baker_addr
             baker_label = counterparty
         elif sender == address:
             direction = "OUT"
             counterparty = target or "?"
+            counterparty_address = target or ""
         elif target == address:
             direction = "IN"
             counterparty = sender or "?"
+            counterparty_address = sender or ""
         else:
             direction = "?"
             counterparty = "?"
+            counterparty_address = ""
 
         item = {
             "ts": it.get("timestamp") or "",
             "direction": direction,
             "amount_xtz": mutez_to_xtz(amount_mutez),
             "counterparty": counterparty,
+            "counterparty_address": counterparty_address,
             "hash": h,
+            "operation_id": _as_int_mutez(it.get("id")),
             "kind": "transaction",
             "entrypoint": entrypoint or op_type or "",
             "_sort_level": _as_int_mutez(it.get("level")),
@@ -1412,7 +1419,9 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             "direction": "STK",
             "amount_xtz": mutez_to_xtz(amount_mutez),
             "counterparty": counterparty,
+            "counterparty_address": baker_addr,
             "hash": h,
+            "operation_id": _as_int_mutez(it.get("id")),
             "kind": "transaction",
             "entrypoint": "stake",
             "baker": counterparty,
@@ -1443,7 +1452,9 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             "direction": "UST",
             "amount_xtz": mutez_to_xtz(amount_mutez),
             "counterparty": counterparty,
+            "counterparty_address": baker_addr,
             "hash": h,
+            "operation_id": _as_int_mutez(it.get("id")),
             "kind": "transaction",
             "entrypoint": "unstake",
             "baker": counterparty,
@@ -1487,7 +1498,9 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             "direction": direction,
             "amount_xtz": mutez_to_xtz(amount_mutez),
             "counterparty": counterparty,
+            "counterparty_address": baker_addr,
             "hash": h,
+            "operation_id": _as_int_mutez(it.get("id")),
             "kind": "transaction",
             "entrypoint": op_kind,
             "baker": counterparty,
@@ -1513,7 +1526,9 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             "direction": direction,
             "amount_xtz": Decimal(0),
             "counterparty": counterparty,
+            "counterparty_address": delegate_addr,
             "hash": h,
+            "operation_id": _as_int_mutez(it.get("id")),
             "kind": "delegation",
             "entrypoint": "delegation",
             "_sort_level": _as_int_mutez(it.get("level")),
@@ -1660,6 +1675,7 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
         if not baker_addr:
             baker_addr = get_delegation_info(rpc, address) or ""
         counterparty = _format_baker_label(rpc, baker_addr)
+        counterparty_address = baker_addr
         baker_label = counterparty
     elif sender == address and target == address and entrypoint == "unstake":
         direction = "UST"
@@ -1667,6 +1683,7 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
         if not baker_addr:
             baker_addr = get_delegation_info(rpc, address) or ""
         counterparty = _format_baker_label(rpc, baker_addr)
+        counterparty_address = baker_addr
         baker_label = counterparty
     elif op_type in ("stake", "unstake") and sender == address:
         direction = "STK" if op_type == "stake" else "UST"
@@ -1676,20 +1693,25 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
         if not baker_addr:
             baker_addr = get_delegation_info(rpc, address) or ""
         counterparty = _format_baker_label(rpc, baker_addr) if baker_addr else "?"
+        counterparty_address = baker_addr
         baker_label = counterparty
     elif op_type == "delegation" and sender == address:
         direction = "DEL"
         delegate = _extract_addr(op_item, "newDelegate", "delegate", "target", "destination")
         counterparty = _format_baker_label(rpc, delegate) if delegate else "—"
+        counterparty_address = delegate
     elif sender == address:
         direction = "OUT"
         counterparty = target or "?"
+        counterparty_address = target or ""
     elif target == address:
         direction = "IN"
         counterparty = sender or "?"
+        counterparty_address = sender or ""
     else:
         direction = "?"
         counterparty = "?"
+        counterparty_address = ""
 
     item_kind = "delegation" if op_type == "delegation" else "transaction"
     item = {
@@ -1697,6 +1719,7 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
         "direction": direction,
         "amount_xtz": mutez_to_xtz(amount_mutez),
         "counterparty": counterparty,
+        "counterparty_address": counterparty_address,
         "hash": op_item.get("hash") or "",
         "kind": item_kind,
         "entrypoint": (

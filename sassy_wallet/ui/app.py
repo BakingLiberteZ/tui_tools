@@ -12,6 +12,7 @@ from threading import RLock
 from functools import lru_cache
 import urllib.request
 import urllib.error
+import urllib.parse
 import time
 import json
 import webbrowser
@@ -225,8 +226,7 @@ class Config:
     TX_FLOW_TOTAL_SECONDS = TX_BLOCK_TIME_SECONDS + TX_UI_GRACE_SECONDS
     TX_HISTORY_UPDATE_SECONDS = 2.0
     STATUS_BLINK_INTERVAL_SECONDS = 0.4
-    PRICE_REFRESH_SECONDS = 60.0
-    PRICE_INITIAL_DELAY_SECONDS = 5.0
+    RPC_PULSE_INTERVAL_SECONDS = 0.24
     # Send keeps a dedicated failsafe to avoid leaving the UI "locked" forever.
     # Keep it >= hard RPC timeout to avoid false positives on slow injections.
     SEND_FAILSAFE_SECONDS = 180.0
@@ -337,6 +337,34 @@ def tzkt_ui_base_from_rpc(rpc: str) -> str:
 
 def tzkt_api_base_from_rpc(rpc: str) -> str:
     return Config.TZKT_API_GHOSTNET if network_from_rpc(rpc) == "ghostnet" else Config.TZKT_API_MAINNET
+
+
+def tzkt_operation_url_from_rpc(rpc: str, op_hash: str, op_id: Any | None = None) -> str:
+    """Build a stable TzKT operation URL for the active network."""
+    clean_hash = str(op_hash or "").strip()
+    if not clean_hash:
+        return ""
+    # Guard against malformed/non-base58 values from transient local rows.
+    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{30,60}", clean_hash):
+        return ""
+    quoted = urllib.parse.quote(clean_hash, safe="")
+    base = f"{tzkt_ui_base_from_rpc(rpc)}/{quoted}"
+    try:
+        op_id_int = int(str(op_id).strip()) if op_id is not None else 0
+    except (TypeError, ValueError):
+        op_id_int = 0
+    if op_id_int > 0:
+        return f"{base}/{op_id_int}"
+    return base
+
+
+def tzkt_address_operations_url_from_rpc(rpc: str, address: str) -> str:
+    """Build a stable TzKT address operations URL for the active network."""
+    clean_addr = str(address or "").strip()
+    if not clean_addr:
+        return ""
+    quoted = urllib.parse.quote(clean_addr, safe="")
+    return f"{tzkt_ui_base_from_rpc(rpc)}/{quoted}/operations"
 
 
 def _normalize_rpc_runtime(rpc: str | None, *, fallback: str) -> tuple[str, bool]:
@@ -757,13 +785,13 @@ def _tx_modal_result(
 
 
 def format_relative_time(timestamp_iso: str) -> str:
-    """Format ISO timestamp as relative time (e.g., '5 min ago', '2 hours ago').
+    """Format ISO timestamp as compact relative time with suffix (e.g., '5m ago').
 
     Args:
         timestamp_iso: ISO 8601 timestamp string
 
     Returns:
-        Relative time string or original timestamp if parsing fails
+        Compact relative time string or original timestamp if parsing fails
     """
     try:
         # Parse ISO timestamp (handle both with and without timezone)
@@ -784,22 +812,22 @@ def format_relative_time(timestamp_iso: str) -> str:
             return "just now"
         elif seconds < 3600:  # < 1 hour
             minutes = int(seconds / 60)
-            return f"{minutes} min ago" if minutes > 1 else "1 min ago"
+            return f"{minutes}m ago"
         elif seconds < 86400:  # < 1 day
             hours = int(seconds / 3600)
-            return f"{hours} hr ago" if hours > 1 else "1 hr ago"
+            return f"{hours}h ago"
         elif seconds < 604800:  # < 1 week
             days = int(seconds / 86400)
-            return f"{days} day{'s' if days > 1 else ''} ago"
+            return f"{days}d ago"
         elif seconds < 2592000:  # < 30 days
             weeks = int(seconds / 604800)
-            return f"{weeks} week{'s' if weeks > 1 else ''} ago"
+            return f"{weeks}w ago"
         elif seconds < 31536000:  # < 1 year
             months = int(seconds / 2592000)
-            return f"{months} month{'s' if months > 1 else ''} ago"
+            return f"{months}mo ago"
         else:
             years = int(seconds / 31536000)
-            return f"{years} year{'s' if years > 1 else ''} ago"
+            return f"{years}y ago"
 
     except (ValueError, TypeError, OverflowError) as e:
         log_error("Failed to parse relative time", exception=e, timestamp=timestamp_iso)
@@ -907,20 +935,6 @@ def _fetch_tzkt_head_level(net: str) -> Optional[int]:
             except (TypeError, ValueError):
                 continue
     return None
-
-
-def _fetch_xtz_price_usd() -> Optional[float]:
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=tezos&vs_currencies=usd"
-    try:
-        data = _fetch_json(url, timeout_s=Config.RPC_FETCH_TIMEOUT)
-    except _FLOW_PRECHECK_EXCEPTIONS as e:
-        log_error("Failed to fetch XTZ price", exception=e, url=url)
-        return None
-    try:
-        price = data.get("tezos", {}).get("usd")
-        return float(price) if price is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def find_baker_for_operation(rpc: str, oph: str, max_depth: int = Config.BAKER_SEARCH_MAX_DEPTH) -> Optional[str]:
@@ -2828,10 +2842,10 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
 
     ImportWizardScreen > Vertical {
         width: auto;
-        min-width: 80;
-        max-width: 100;
+        min-width: 65;
+        max-width: 80;
         height: auto;
-        max-height: 44;
+        max-height: 30;
         overflow-y: auto;
         background: $surface;
         border: solid $primary;
@@ -6837,6 +6851,8 @@ class TxDetailsScreen(ModalScreen[None]):
 
     TxDetailsScreen #tx_details {
         margin-bottom: 0;
+        color: #d0d7de;
+        text-style: dim;
     }
 
     TxDetailsScreen #buttons {
@@ -6863,6 +6879,7 @@ class TxDetailsScreen(ModalScreen[None]):
             amt: Decimal = self.tx.get("amount_xtz") or Decimal(0)
             cp = self.tx.get("counterparty") or "?"
             h = self.tx.get("hash") or ""
+            op_id = self.tx.get("operation_id")
             baker = self.tx.get("baker") or ""
 
             # Determine From and To based on direction
@@ -6880,22 +6897,27 @@ class TxDetailsScreen(ModalScreen[None]):
                 amt_label = f"{format_xtz(amt)} XTZ"
 
             # Build TzKT link
-            self.tzkt_link = f"{tzkt_ui_base_from_rpc(self.rpc)}/{h}" if h else ""
+            self.tzkt_link = tzkt_operation_url_from_rpc(self.rpc, h, op_id)
 
             # Shorten addresses for display
             from_short = from_addr[:10] + "..." + from_addr[-8:] if len(from_addr) > 20 else from_addr
             to_short = to_addr[:10] + "..." + to_addr[-8:] if len(to_addr) > 20 else to_addr
             lines = [
-                f"Time:    {ts}",
-                f"Amount:  {amt_label}",
-                f"From:    {from_short}",
-                f"To:      {to_short}",
-                f"Hash:    {h}",
+                "[b #8cb7c5]Operation Details[/b #8cb7c5]",
+                f"[#d6ad79]Time[/#d6ad79]: {ts}",
+                f"[#d6ad79]Amount[/#d6ad79]: {amt_label}",
+                "",
+                "[b #8cb7c5]Route[/b #8cb7c5]",
+                f"[#d6ad79]From[/#d6ad79]: {from_short}",
+                f"[#d6ad79]To[/#d6ad79]: {to_short}",
+                "",
+                "[b #8cb7c5]References[/b #8cb7c5]",
+                f"[#d6ad79]Hash[/#d6ad79]: {h}",
             ]
 
             if baker:
                 baker_short = baker[:10] + "..." + baker[-8:] if len(baker) > 20 else baker
-                lines.append(f"Baker:   {baker_short}")
+                lines.append(f"[#d6ad79]Baker[/#d6ad79]: {baker_short}")
 
             yield Static("\n".join(lines), id="tx_details", markup=True)
 
@@ -8753,7 +8775,7 @@ class WalletApp(App):
 
     /* Keep main padding inside a fixed container to avoid modal-open layout shifts. */
     #main_content {
-        padding: 1 24;
+        padding: 1 24 0 24;
         align: center top;
     }
 
@@ -9004,35 +9026,40 @@ class WalletApp(App):
 
     #wallet_details {
         height: auto;
-        padding: 0 1 0 2;
+        padding: 1 2 0 2;
         margin-bottom: 0;
         background: $surface;
     }
 
     #wallet_status {
         height: auto;
-        margin-top: 1;
+        margin-top: 0;
         margin-bottom: 1;
+        color: #f3f7ff;
     }
 
     #wallet_balance {
         height: auto;
         margin-bottom: 1;
+        color: #d5deef;
     }
 
     #wallet_delegation {
         height: auto;
         margin-bottom: 1;
+        color: #d5deef;
     }
 
     #wallet_staking {
         height: auto;
         margin-bottom: 1;
+        color: #d5deef;
     }
 
     #wallet_network {
         height: auto;
-        margin-bottom: 0;
+        margin-bottom: 1;
+        color: #d5deef;
     }
 
     #action_buttons {
@@ -9138,6 +9165,8 @@ class WalletApp(App):
     #tx_detail_content {
         height: auto;
         padding: 0 1;
+        color: #d0d7de;
+        text-style: dim;
     }
 
     #tx_detail_content Link {
@@ -9153,7 +9182,7 @@ class WalletApp(App):
     #bottom_bar {
         height: auto;
         min-height: 1;
-        margin-top: 0;
+        margin-top: 1;
         margin-bottom: 0;
         padding: 0;
         background: $boost;
@@ -9181,16 +9210,6 @@ class WalletApp(App):
         link-style: underline;
     }
 
-    #price_indicator {
-        width: auto;
-        min-width: 10;
-        padding: 0 1;
-        text-align: right;
-        color: #3b82f6;
-        text-style: bold;
-        background: $boost;
-    }
-
     #rpc_indicator {
         width: auto;
         min-width: 18;
@@ -9199,6 +9218,10 @@ class WalletApp(App):
         color: #3e9967;
         text-style: bold;
         background: $boost;
+    }
+
+    #rpc_indicator.rpc-offline {
+        color: #dc2626;
     }
 
     /* Status bar states with glow effects */
@@ -9457,14 +9480,10 @@ class WalletApp(App):
         self._breathing_bright: bool = True
         self._breathing_timer = None
 
-        self._price_timer = None
-        self._price_initial_timer = None
-        self._price_usd: float | None = None
-
-        self._rpc_pulse_timer = None
-        self._rpc_pulse_i: int = 0
         self._rpc_short: str = ""
         self._rpc_online: bool = True
+        self._rpc_pulse_step: int = 0
+        self._rpc_pulse_timer = None
 
         # Subtle loading animation for account rows
         self._loading_accounts: set[str] = set()
@@ -9550,10 +9569,10 @@ class WalletApp(App):
                 )
                 # Column headers for both panels with fixed widths matching content
                 with Horizontal(id="history_headers"):
-                    # Fixed widths: #=3, Time=12, Type=4, Amount=15, Destination=23, Status=10
-                    header_line = f"{'#':<3} {'Time':<12}  {'Type':<4}  {'Amount':<15}  {'Destination':<23}  {'Status':<10}"
+                    # Fixed widths: #=3, Time=11, Amount=15, Destination=39, Status=9
+                    header_line = f"{'#':<3} {'Time':<11}  {'Amount':<15}  {'Destination':<39}  {'Status':<9}"
                     yield Static(header_line, id="history_header", markup=True)
-                    yield Static("[b]More info[/b]", id="tx_detail_header", markup=True)
+                    yield Static("[b]Operation Summary[/b]", id="tx_detail_header", markup=True)
                 with Horizontal(id="history_split"):
                     yield ListView(id="history")
                     with Vertical(id="tx_detail_pane"):
@@ -9563,8 +9582,7 @@ class WalletApp(App):
                 with Horizontal(id="bottom_bar"):
                     yield Static("🍞 Oven ready!", id="status_line", markup=True)
                     yield Static("", id="tx_link_area", markup=True)
-                    yield Static("ꜩ XTZ Price: --", id="price_indicator", markup=True)
-                    yield Static("● RPC", id="rpc_indicator", markup=True)
+                    yield Static("RPC", id="rpc_indicator", markup=True)
 
         yield Footer()
 
@@ -9574,7 +9592,6 @@ class WalletApp(App):
 
         self._update_rpc_indicator()
         self._start_rpc_pulse()
-        self._start_price_indicator()
         self._render_accounts()
         self._maybe_warn_terminal_size(self.size)
         # Auto-pick an RPC that supports BOTH simulation and injection.
@@ -9656,15 +9673,12 @@ class WalletApp(App):
         if self._auto_refresh_timer:
             self._auto_refresh_timer.stop()
             self._auto_refresh_timer = None
-        if self._price_timer:
-            self._price_timer.stop()
-            self._price_timer = None
-        if self._price_initial_timer:
-            self._price_initial_timer.stop()
-            self._price_initial_timer = None
         if self._copy_blink_timer:
             self._copy_blink_timer.stop()
             self._copy_blink_timer = None
+        if self._rpc_pulse_timer:
+            self._rpc_pulse_timer.stop()
+            self._rpc_pulse_timer = None
 
         log_info("WalletApp unmounted, timers cleaned up")
 
@@ -9786,14 +9800,12 @@ class WalletApp(App):
             return
 
     @on(MouseDown, "#bottom_bar")
-    @on(MouseDown, "#price_indicator")
     @on(MouseDown, "#rpc_indicator")
     def _stop_bottom_bar_mouse_down(self, event: MouseDown) -> None:
         """Prevent clicks from shifting focus or causing flicker."""
         event.stop()
 
     @on(MouseUp, "#bottom_bar")
-    @on(MouseUp, "#price_indicator")
     @on(MouseUp, "#rpc_indicator")
     def _stop_bottom_bar_mouse_up(self, event: MouseUp) -> None:
         """Ignore mouse-up events on the bottom bar area."""
@@ -9927,52 +9939,55 @@ class WalletApp(App):
             return
         self.set_timer(delay_seconds, fn)
 
-    def _start_price_indicator(self) -> None:
-        if self._price_timer is None:
-            self._price_timer = self.set_interval(Config.PRICE_REFRESH_SECONDS, self._request_price_refresh)
-        if self._price_initial_timer is None:
-            self._price_initial_timer = self.set_timer(
-                Config.PRICE_INITIAL_DELAY_SECONDS,
-                self._request_price_refresh,
-            )
-
-    def _request_price_refresh(self) -> None:
-        self.run_worker(self._fetch_price_worker, exclusive=False, thread=True)
-
-    def _fetch_price_worker(self) -> None:
-        price = _fetch_xtz_price_usd()
-        self._ui(self._apply_price, price)
-
-    def _apply_price(self, price: Optional[float]) -> None:
-        self._price_usd = price
-        if price is None:
-            text = "ꜩ XTZ Price: --"
-        else:
-            text = f"ꜩ XTZ Price: ${price:,.2f}"
-        try:
-            self.query_one("#price_indicator", Static).update(text)
-        except _UI_QUERY_EXCEPTIONS as e:
-            log_error("Failed to update price indicator", exception=e)
-
     def _start_rpc_pulse(self) -> None:
-        if self._rpc_pulse_timer is None:
-            self._rpc_pulse_timer = self.set_interval(0.6, self._tick_rpc_pulse)
+        if self._rpc_pulse_timer is not None:
+            try:
+                self._rpc_pulse_timer.stop()
+            except _UI_QUERY_EXCEPTIONS as e:
+                log_debug("Failed to stop RPC pulse timer", exception=str(e))
+            self._rpc_pulse_timer = None
+        self._rpc_pulse_step = 0
         self._render_rpc_indicator()
+        self._rpc_pulse_timer = self.set_interval(
+            Config.RPC_PULSE_INTERVAL_SECONDS,
+            self._tick_rpc_pulse,
+        )
 
     def _tick_rpc_pulse(self) -> None:
-        if self._rpc_pulse_timer is None:
+        if not self._rpc_online:
             return
-        self._rpc_pulse_i += 1
+        if self._breathing_active:
+            return
+        # Soft "breathing" effect: smooth in/out brightness cycle.
+        self._rpc_pulse_step = (self._rpc_pulse_step + 1) % 12
         self._render_rpc_indicator()
 
     def _render_rpc_indicator(self) -> None:
         try:
+            indicator = self.query_one("#rpc_indicator", Static)
             if self._rpc_online:
-                blink = (self._rpc_pulse_i % 2) == 0
-                dot = "[#4bbf95]●[/#4bbf95]" if blink else "[#4abf7a]●[/#4abf7a]"
+                indicator.remove_class("rpc-offline")
+                pulse_colors = (
+                    "#2f6f52",
+                    "#357a59",
+                    "#3e8d66",
+                    "#49a979",
+                    "#52bf85",
+                    "#58d68d",
+                    "#66e39b",
+                    "#49a979",
+                    "#52bf85",
+                    "#3e8d66",
+                    "#357a59",
+                    "#2f6f52",
+                )
+                dot_color = pulse_colors[self._rpc_pulse_step]
+                rpc_label = (self._rpc_short or "RPC").replace("[", "\\[").replace("]", "\\]")
+                indicator.update(f"[bold {dot_color}]●[/bold {dot_color}] [#3e9967]{rpc_label}[/#3e9967]")
             else:
-                dot = "[red]●[/red]"
-            self.query_one("#rpc_indicator", Static).update(f"{dot} {self._rpc_short or 'RPC'}")
+                indicator.add_class("rpc-offline")
+                rpc_label = (self._rpc_short or "Offline").replace("[", "\\[").replace("]", "\\]")
+                indicator.update(f"[bold #dc2626]●[/bold #dc2626] [#dc2626]{rpc_label}[/#dc2626]")
         except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update RPC indicator", exception=e)
 
@@ -10461,6 +10476,8 @@ class WalletApp(App):
         self._breathing_bright_class = bright_class
         self._breathing_dim_class = dim_class
         self._last_status = text
+        # Freeze RPC pulse while processing glow is active to avoid mixed flicker.
+        self._rpc_pulse_step = 5
 
         try:
             status_widget = self.query_one("#status_line", Static)
@@ -10477,6 +10494,7 @@ class WalletApp(App):
             # Start with bright state
             status_widget.add_class(bright_class)
             bottom_bar.add_class(bright_class)
+            self._render_rpc_indicator()
 
             # Schedule breathing toggle
             self._breathing_timer = self.set_timer(Config.STATUS_BLINK_INTERVAL_SECONDS, self._toggle_breathing)
@@ -10543,6 +10561,7 @@ class WalletApp(App):
             for cls in _STATUS_STYLE_CLASSES:
                 status_widget.remove_class(cls)
                 bottom_bar.remove_class(cls)
+            self._render_rpc_indicator()
 
         except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to stop breathing effect", exception=e)
@@ -10627,13 +10646,16 @@ class WalletApp(App):
         try:
             # Shorten RPC URL for display
             rpc_short = self.rpc.replace("https://", "").replace("http://", "")
+            # Defensive cleanup in case a malformed value with bullets/markup was persisted.
+            rpc_short = re.sub(r"\[[^\]]+\]", "", rpc_short)
+            rpc_short = re.sub(r"^[\s●•◉·∙◦🟢🟩]+", "", rpc_short).strip()
+            rpc_short = re.sub(r"[●•◉·∙◦🟢🟩]", "", rpc_short).strip()
             if len(rpc_short) > 35:
                 rpc_short = rpc_short[:32] + "..."
 
             self._rpc_short = rpc_short
             self._rpc_online = True
             self._render_rpc_indicator()
-            self._request_price_refresh()
         except _UI_QUERY_EXCEPTIONS as e:
             log_error("Failed to update RPC indicator", exception=e)
             try:
@@ -10691,12 +10713,12 @@ class WalletApp(App):
         idx = self.history_selected_index
         if idx < 0 or idx >= len(self.history_items):
             if self.selected:
-                tzkt_url = f"https://tzkt.io/{self.selected.address}/operations"
-                tzkt_link = (
-                    f"[u][link=\"{tzkt_url}\"]{tzkt_url}[/link][/u] "
-                    "[dim](Shift+Left click)[/dim]"
+                tzkt_url = tzkt_address_operations_url_from_rpc(self.rpc, self.selected.address)
+                tzkt_link = f"[u][link=\"{tzkt_url}\"]{tzkt_url}[/link][/u]"
+                detail_pane.update(
+                    "[b #8cb7c5]Explorer[/b #8cb7c5]\n"
+                    f"{tzkt_link}"
                 )
-                detail_pane.update(f"[b]More on TzKT[/b]\n{tzkt_link}")
                 return
             detail_pane.update("Invalid selection")
             return
@@ -10709,14 +10731,14 @@ class WalletApp(App):
         amt: Decimal = tx.get("amount_xtz") or Decimal(0)
         cp = tx.get("counterparty") or "?"
         h = tx.get("hash") or ""
+        op_id = tx.get("operation_id")
         baker = tx.get("baker") or ""
         kind = tx.get("kind") or ""
         entrypoint = tx.get("entrypoint") or ""
         status = (tx.get("status") or "CONFIRMED").upper()
 
         # Build TzKT link
-        tzkt_base = tzkt_ui_base_from_rpc(self.rpc)
-        tzkt_link = f"{tzkt_base}/{h}" if h else ""
+        tzkt_link = tzkt_operation_url_from_rpc(self.rpc, h, op_id)
 
         # Get wallet address
         wallet_addr = self.selected.address if self.selected else ""
@@ -10752,33 +10774,42 @@ class WalletApp(App):
             amt_label = f"{format_xtz(amt)} XTZ"
 
         # Build details text - single line per field (except Hash and TzKT link)
+        from_short = from_addr if len(from_addr) <= 30 else f"{from_addr[:14]}...{from_addr[-10:]}"
+        to_short = to_addr if len(to_addr) <= 30 else f"{to_addr[:14]}...{to_addr[-10:]}"
+        hash_short = h if len(h) <= 34 else f"{h[:16]}...{h[-14:]}"
         lines = [
-            f"[b]Date:[/b] {ts}",
-            f"[b]Type:[/b] {kind or '-'}",
-            f"[b]Status:[/b] {status}",
-            f"[b]From:[/b] {from_addr}",
-            f"[b]To:[/b] {to_addr}",
-            f"[b]Amount:[/b] {amt_label}",
+            f"[#d6ad79]Date[/#d6ad79]: [dim]{ts}[/dim]",
+            f"[#d6ad79]Type[/#d6ad79]: [dim]{kind or '-'}[/dim]",
+            f"[#d6ad79]Status[/#d6ad79]: [dim]{status}[/dim]",
+            f"[#d6ad79]Amount[/#d6ad79]: {amt_label}",
+            "",
+            "[b #8cb7c5]Route[/b #8cb7c5]",
+            f"[#d6ad79]From[/#d6ad79]: [dim]{from_short}[/dim]",
+            f"[#d6ad79]To[/#d6ad79]: [dim]{to_short}[/dim]",
         ]
 
         if entrypoint:
             lines.extend([
-                f"[b]Entrypoint:[/b] {entrypoint}",
+                f"[#d6ad79]Entrypoint[/#d6ad79]: [dim]{entrypoint}[/dim]",
             ])
 
-        lines.extend([
-            f"[b]Hash:[/b] {h}",
-        ])
+        lines.extend(
+            [
+                "",
+                "[b #8cb7c5]References[/b #8cb7c5]",
+                f"[#d6ad79]Hash[/#d6ad79]: [dim]{hash_short}[/dim]",
+            ]
+        )
 
         if baker:
             lines.extend([
-                f"[b]Baker:[/b] {baker}",
+                f"[#d6ad79]Baker[/#d6ad79]: [dim]{baker}[/dim]",
             ])
 
         if tzkt_link:
             lines.extend([
-                "[b]TzKT Explorer:[/b]",
-                f"  [link=\"{tzkt_link}\"][u]{tzkt_link}[/u][/link] [dim](Shift + Left Click)[/dim]",
+                "[#d6ad79]TzKT Explorer[/#d6ad79]:",
+                f"  [link=\"{tzkt_link}\"][u]{tzkt_link}[/u][/link]",
             ])
 
         detail_pane.update("\n".join(lines))
@@ -11154,45 +11185,59 @@ class WalletApp(App):
         self.history_selected_index = event.list_view.index
         self._update_tx_details()
 
+    def _wallet_info_note(self, message: str, *, color: str = "#8fa0b3") -> str:
+        return f"[i {color}]{message}[/i {color}]"
+
+    def _wallet_info_line(
+        self,
+        label: str,
+        value_markup: str,
+        *,
+        note_markup: str = "",
+        label_color: str = "#d6ad79",
+    ) -> str:
+        line = f"[b][{label_color}]{label}:[/{label_color}][/b] {value_markup}"
+        if note_markup:
+            line = f"{line} {note_markup}"
+        return line
+
     def _update_status_balance(self) -> None:
         if not self.selected:
             # Show labels only with placeholder values
-            label_color = "#d6ad79"
             self.query_one("#wallet_status", Static).update(
-                f"[b][{label_color}]Wallet:[/{label_color}][/b] -"
+                self._wallet_info_line("Wallet", "-")
             )
             self.query_one("#wallet_balance", Static).update(
-                f"[b][{label_color}]Balance:[/{label_color}][/b] -"
+                self._wallet_info_line("Balance", "-")
             )
             self.query_one("#wallet_delegation", Static).update(
-                f"[b][{label_color}]Delegation:[/{label_color}][/b] -"
+                self._wallet_info_line("Delegation", "-")
             )
             self.query_one("#wallet_staking", Static).update(
-                f"[b][{label_color}]Staking:[/{label_color}][/b] -"
+                self._wallet_info_line("Staking", "-")
             )
             self.query_one("#wallet_network", Static).update(
-                f"[b][{label_color}]Network:[/{label_color}][/b] -"
+                self._wallet_info_line("Network", "-")
             )
             return
 
-        label_color = "#d6ad79"
         wallet_tag = " [dim](watch-only)[/dim]" if self.selected.enc is None else ""
         self.query_one("#wallet_status", Static).update(
-            f"[b][{label_color}]Wallet:[/{label_color}][/b] [b]{self.selected.name}[/b]{wallet_tag}"
+            self._wallet_info_line("Wallet", f"[b]{self.selected.name}[/b]{wallet_tag}")
         )
         self.query_one("#wallet_balance", Static).update(
-            f"[b][{label_color}]Balance:[/{label_color}][/b] [dim]Loading...[/dim]"
+            self._wallet_info_line("Balance", "[dim]Loading...[/dim]")
         )
         self.query_one("#wallet_delegation", Static).update(
-            f"[b][{label_color}]Delegated to:[/{label_color}][/b] [dim]Loading...[/dim]"
+            self._wallet_info_line("Delegated to", "[dim]Loading...[/dim]")
         )
         self.query_one("#wallet_staking", Static).update(
-            f"[b][{label_color}]Staked Balance:[/{label_color}][/b] [dim]Loading...[/dim]"
+            self._wallet_info_line("Staked Balance", "[dim]Loading...[/dim]")
         )
         net = network_from_rpc(self.rpc)
         net_label = "Mainnet" if net == "mainnet" else "Ghostnet"
         self.query_one("#wallet_network", Static).update(
-            f"[b][{label_color}]Network:[/{label_color}][/b] [#4bbf95]●[/#4bbf95] {net_label}"
+            self._wallet_info_line("Network", f"[#4bbf95]●[/#4bbf95] {net_label}")
         )
         self._fetch_selected_status(self.selected.address)
 
@@ -11242,13 +11287,16 @@ class WalletApp(App):
     ) -> None:
         if not self.selected or self.selected.address != address:
             return
-        label_color = "#d6ad79"
         balance_xtz = mutez_to_xtz(bal)
         is_staking = staking_bal > 0
         is_delegating = delegate is not None
         self._balance_message = get_balance_message(balance_xtz, is_staking, is_delegating)
         self.query_one("#wallet_balance", Static).update(
-            f"[b][{label_color}]Balance:[/{label_color}][/b] [b]{format_xtz(balance_xtz)} XTZ[/b] [#8cb7c5]{self._balance_message}[/#8cb7c5]"
+            self._wallet_info_line(
+                "Balance",
+                f"[b]{format_xtz(balance_xtz)} XTZ[/b]",
+                note_markup=self._wallet_info_note(self._balance_message, color="#90a8bb"),
+            )
         )
 
         if delegate:
@@ -11256,40 +11304,52 @@ class WalletApp(App):
                 baker_balance_xtz = mutez_to_xtz(baker_info['balance'])
                 commentary_short = get_baker_commentary_short(baker_balance_xtz)
                 baker_display = baker_info.get('alias') or delegate
-                delegation_text = (
-                    f"[b][{label_color}]Delegated to:[/{label_color}][/b] "
-                    f"[#8cb7c5]{baker_display}[/#8cb7c5] - {commentary_short}"
+                delegation_text = self._wallet_info_line(
+                    "Delegated to",
+                    f"[#8cb7c5]{baker_display}[/#8cb7c5]",
+                    note_markup=self._wallet_info_note(commentary_short, color="#89a2b4"),
                 )
             else:
-                delegation_text = f"[b][{label_color}]Delegated to:[/{label_color}][/b] [#8cb7c5]{delegate}[/#8cb7c5]"
+                delegation_text = self._wallet_info_line("Delegated to", f"[#8cb7c5]{delegate}[/#8cb7c5]")
             self.query_one("#wallet_delegation", Static).update(delegation_text)
         else:
             self.query_one("#wallet_delegation", Static).update(
-                f"[b][{label_color}]Delegated to:[/{label_color}][/b] [dim]not delegated[/dim]"
+                self._wallet_info_line("Delegated to", "[dim]not delegated[/dim]")
             )
 
         if staking_bal > 0:
             self._staking_message = get_staking_message("chad")
             self.query_one("#wallet_staking", Static).update(
-                f"[b][{label_color}]Staked Balance:[/{label_color}][/b] [b]{format_xtz(mutez_to_xtz(staking_bal))} XTZ[/b] [#4bbf95]{self._staking_message}[/#4bbf95]"
+                self._wallet_info_line(
+                    "Staked Balance",
+                    f"[b]{format_xtz(mutez_to_xtz(staking_bal))} XTZ[/b]",
+                    note_markup=self._wallet_info_note(self._staking_message, color="#78b99c"),
+                )
             )
         elif delegate:
             self._staking_message = get_staking_message("boring")
             self.query_one("#wallet_staking", Static).update(
-                f"[b][{label_color}]Staked Balance:[/{label_color}][/b] [dim]-[/dim] [#c39a56]{self._staking_message}[/#c39a56]"
+                self._wallet_info_line(
+                    "Staked Balance",
+                    "[dim]-[/dim]",
+                    note_markup=self._wallet_info_note(self._staking_message, color="#b79d6e"),
+                )
             )
         else:
             self._staking_message = get_staking_message("lazy")
             self.query_one("#wallet_staking", Static).update(
-                f"[b][{label_color}]Staked Balance:[/{label_color}][/b] [dim]-[/dim] [red]{self._staking_message}[/red]"
+                self._wallet_info_line(
+                    "Staked Balance",
+                    "[dim]-[/dim]",
+                    note_markup=self._wallet_info_note(self._staking_message, color="#bb8b8b"),
+                )
             )
 
     def _apply_selected_status_error(self, address: str, err: str) -> None:
         if not self.selected or self.selected.address != address:
             return
-        label_color = "#d6ad79"
         self.query_one("#wallet_balance", Static).update(
-            f"[b][{label_color}]Balance:[/{label_color}][/b] error: {err}"
+            self._wallet_info_line("Balance", f"[red]error:[/red] {err}")
         )
 
     # -------------------------
@@ -11325,14 +11385,12 @@ class WalletApp(App):
             notice_item = ListItem(Label(self._history_notice, markup=True))
             hv.append(notice_item)
             if self.selected:
-                tzkt_url = f"https://tzkt.io/{self.selected.address}/operations"
-                tzkt_link = (
-                    f"[u][link=\"{tzkt_url}\"]{tzkt_url}[/link][/u] "
-                    "[dim](Shift+Left click)[/dim]"
-                )
+                tzkt_url = tzkt_address_operations_url_from_rpc(self.rpc, self.selected.address)
+                tzkt_link = f"[u][link=\"{tzkt_url}\"]{tzkt_url}[/link][/u]"
                 try:
                     self.query_one("#tx_detail_content", Static).update(
-                        f"[b]More on TzKT[/b]\n{tzkt_link}"
+                        "[b #8cb7c5]Explorer[/b #8cb7c5]\n"
+                        f"{tzkt_link}"
                     )
                 except _UI_QUERY_EXCEPTIONS as e:
                     log_error("Failed to update tzkt link in tx details", exception=e)
@@ -11401,12 +11459,15 @@ class WalletApp(App):
         self._cache_visible_history_for_address(address)
 
     def _format_history_line(self, idx: int, it: dict) -> str:
+        time_width = 11
+        destination_width = 39
+        status_width = 9
         ts_raw = it.get("ts") or ""
         ts = format_relative_time(ts_raw)
 
         direction = it.get("direction") or "?"
         amt: Decimal = it.get("amount_xtz") or Decimal(0)
-        cp = it.get("counterparty") or "?"
+        cp = (it.get("counterparty") or it.get("counterparty_address") or "?").strip() or "?"
 
         amt_formatted = format_xtz(amt)
         if direction == "IN":
@@ -11426,40 +11487,23 @@ class WalletApp(App):
         else:
             amt_str = f"{f'{amt_formatted} XTZ':<15}"
 
-        kind = (it.get("kind") or "").lower()
         entrypoint = (it.get("entrypoint") or "").lower()
-        if entrypoint == "change_baker":
-            type_raw = "CH"
-        elif kind == "delegation":
-            type_raw = "DLG"
-        elif entrypoint == "stake":
-            type_raw = "STK"
-        elif entrypoint == "unstake":
-            type_raw = "USTK"
-        elif direction == "STK":
-            type_raw = "STK"
-        elif direction == "UST":
-            type_raw = "USTK"
-        else:
-            type_raw = "TX"
 
-        if type_raw in ("DLG", "CH"):
-            type_text = f"[#d4a857]{type_raw:<4}[/#d4a857]"
-        elif type_raw in ("STK", "USTK"):
-            type_text = f"[#7b6cc4]{type_raw:<4}[/#7b6cc4]"
+        if len(cp) > destination_width:
+            if direction in ("DEL", "UND", "STK", "UST") and (cp.startswith("tz") or cp.startswith("KT1")):
+                # Prioritize baker addresses in Destination for staking/delegation rows.
+                cp_display = cp
+            else:
+                half = max(1, (destination_width - 1) // 2)
+                cp_display = f"{cp[:half]}…{cp[-half:]}"
         else:
-            type_text = f"{type_raw:<4}"
+            cp_display = f"{cp:<{destination_width}}"
 
-        if len(cp) > 23:
-            cp_display = (cp[:11] + "…" + cp[-11:])
-        else:
-            cp_display = f"{cp:<23}"
-
-        ts_padded = f"{ts:<12}"
+        ts_padded = f"{ts:<{time_width}}"
         status = (it.get("status") or "CONFIRMED").upper()
         if status == "PROCESSING":
             if entrypoint == "change_baker":
-                status_label = "CHANGING BAKER"
+                status_label = "CHANGING"
             elif direction in ("DEL", "UND"):
                 status_label = "DELEGATING"
             elif direction == "UST":
@@ -11472,7 +11516,7 @@ class WalletApp(App):
                 status_label = "BAKING TX"
         elif status == "PENDING":
             if entrypoint == "change_baker":
-                status_label = "CHANGING BAKER"
+                status_label = "CHANGING"
             elif direction in ("DEL", "UND"):
                 status_label = "DELEGATING"
             elif direction == "UST":
@@ -11487,7 +11531,7 @@ class WalletApp(App):
             status_label = "FAIL"
         else:
             if entrypoint == "change_baker":
-                status_label = "BAKER CHANGED"
+                status_label = "BAKER CHG"
             elif direction in ("DEL", "UND"):
                 status_label = "DELEGATED"
             elif direction == "UST":
@@ -11514,14 +11558,17 @@ class WalletApp(App):
         else:
             status_color = "green"
 
+        if len(status_label) > status_width:
+            status_label = status_label[: status_width - 1] + "…"
+
         if status in ("PENDING", "PROCESSING"):
             shimmer = shimmer_text(status_label, self._pending_shimmer_i, span=2, pingpong=True)
-            status_text = f"{shimmer}{' ' * max(0, 10 - len(status_label))}"
+            status_text = f"{shimmer}{' ' * max(0, status_width - len(status_label))}"
         else:
-            status_text = f"[{status_color}]{status_label:<10}[/{status_color}]"
+            status_text = f"[{status_color}]{status_label:<{status_width}}[/{status_color}]"
 
         idx_text = f"{idx:<3}"
-        return f"{idx_text} {ts_padded}  {type_text}  {amt_str}  {cp_display}  {status_text}"
+        return f"{idx_text} {ts_padded}  {amt_str}  {cp_display}  {status_text}"
 
     def _history_cache_key(self, address: str) -> tuple[str, int]:
         return (address, self.history_limit)
