@@ -55,7 +55,7 @@ uv run pip-audit -l --ignore-vuln CVE-2024-23342
 
 ## 🧠 Why This Exists
 
-Most wallets treat you like a baby. This one treats you like a grown-up baker.
+Most wallets treat you like a baby. This one treats you like a grown-up ADULT.
 
 ## ⚠️ Warning (Read Me, Chef)
 
