@@ -915,7 +915,11 @@ def _tzkt_latest_entrypoint_level(
         for it in items:
             if not isinstance(it, dict):
                 continue
-            op_type = it.get("type") or it.get("kind") or it.get("action")
+            raw_type = str(it.get("type") or "").lower().strip()
+            if raw_type == "staking":
+                op_type = it.get("action") or it.get("kind") or raw_type
+            else:
+                op_type = it.get("type") or it.get("kind") or it.get("action")
             if op_type and str(op_type).lower() not in (entrypoint,):
                 continue
             try:
@@ -1190,7 +1194,12 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         return union
 
     def _op_type(it: dict) -> str:
-        raw = it.get("type") or it.get("kind") or it.get("action") or ""
+        # TzKT staking endpoint uses type="staking" and action="stake|unstake|finalize".
+        raw_type = str(it.get("type") or "").lower().strip()
+        if raw_type == "staking":
+            raw = it.get("action") or it.get("kind") or raw_type
+        else:
+            raw = it.get("type") or it.get("kind") or it.get("action") or ""
         return str(raw).lower().strip()
 
     def _as_int_mutez(v: Any) -> int:
@@ -1639,7 +1648,11 @@ def resolve_tx_by_hash(rpc: str, address: str, oph: str) -> Optional[Dict[str, A
     metadata = op_item.get("metadata") or {}
     op_res = metadata.get("operation_result") or {}
     updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
-    op_type = str(op_item.get("type") or op_item.get("kind") or op_item.get("action") or "").lower()
+    raw_type = str(op_item.get("type") or "").lower().strip()
+    if raw_type == "staking":
+        op_type = str(op_item.get("action") or op_item.get("kind") or raw_type).lower().strip()
+    else:
+        op_type = str(op_item.get("type") or op_item.get("kind") or op_item.get("action") or "").lower().strip()
 
     if sender == address and target == address and entrypoint == "stake":
         direction = "STK"

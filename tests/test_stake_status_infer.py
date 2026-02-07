@@ -25,6 +25,27 @@ def test_infer_is_staking_prefers_tzkt_staking_endpoint(monkeypatch):
     assert any("/v1/operations/staking?" in u for u in seen_urls)
 
 
+def test_infer_is_staking_handles_staking_action_field(monkeypatch):
+    rpc = "https://rpc.tzkt.io/mainnet"
+    addr = "tz1fakeaddressxxxxxxxxxxxxxxxxxxxxxxx"
+
+    def _fake_urlopen(req, timeout=15, retries=3):
+        url = req.full_url
+        if "/v1/operations/staking?" in url and "action=stake" in url:
+            return [{"level": 200, "type": "staking", "action": "stake"}]
+        if "/v1/operations/staking?" in url and "action=unstake" in url:
+            return [{"level": 150, "type": "staking", "action": "unstake"}]
+        if "/v1/operations/staking?" in url and "type=stake" in url:
+            return []
+        if "/v1/operations/staking?" in url and "type=unstake" in url:
+            return []
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(tezos, "_urlopen_json_with_retries", _fake_urlopen)
+
+    assert tezos.infer_is_staking(rpc, addr, force_refresh=True) is True
+
+
 def test_infer_is_staking_falls_back_when_staking_endpoint_missing(monkeypatch):
     rpc = "https://rpc.tzkt.io/mainnet"
     addr = "tz1fakeaddressxxxxxxxxxxxxxxxxxxxxxxx"

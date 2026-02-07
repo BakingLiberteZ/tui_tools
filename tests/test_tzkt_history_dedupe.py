@@ -230,6 +230,62 @@ def test_get_xtz_history_includes_stake_from_staking_endpoint_when_legacy_tx_mis
     assert "op_stake_native" in hashes
 
 
+def test_get_xtz_history_includes_stake_from_staking_action_field(monkeypatch):
+    address = "tz1SOURCE11111111111111111111111111111"
+    _mock_history_sources(
+        monkeypatch,
+        tx_items=[],
+        stake_items=[],
+        unstake_items=[],
+        staking_items=[
+            {
+                "timestamp": "2026-02-06T12:00:30Z",
+                "type": "staking",
+                "action": "stake",
+                "sender": {"address": address},
+                "staker": {"address": address},
+                "baker": {"address": "tz1BAKER11111111111111111111111111111", "alias": "Baker One"},
+                "amount": 10_000,
+                "hash": "op_stake_action_field",
+                "metadata": {},
+            }
+        ],
+    )
+
+    items = tezos.get_xtz_history("https://rpc.tzkt.io/mainnet", address, limit=10)
+    row = next(it for it in items if it.get("hash") == "op_stake_action_field")
+    assert row.get("direction") == "STK"
+    assert row.get("entrypoint") == "stake"
+
+
+def test_get_xtz_history_includes_unstake_from_staking_action_field(monkeypatch):
+    address = "tz1SOURCE11111111111111111111111111111"
+    _mock_history_sources(
+        monkeypatch,
+        tx_items=[],
+        stake_items=[],
+        unstake_items=[],
+        staking_items=[
+            {
+                "timestamp": "2026-02-06T12:00:40Z",
+                "type": "staking",
+                "action": "unstake",
+                "sender": {"address": address},
+                "staker": {"address": address},
+                "baker": {"address": "tz1BAKER11111111111111111111111111111", "alias": "Baker One"},
+                "amount": 20_000,
+                "hash": "op_unstake_action_field",
+                "metadata": {},
+            }
+        ],
+    )
+
+    items = tezos.get_xtz_history("https://rpc.tzkt.io/mainnet", address, limit=10)
+    row = next(it for it in items if it.get("hash") == "op_unstake_action_field")
+    assert row.get("direction") == "UST"
+    assert row.get("entrypoint") == "unstake"
+
+
 def test_get_xtz_history_dedupes_same_hash_between_staking_and_legacy_entries(monkeypatch):
     address = "tz1SOURCE11111111111111111111111111111"
     _mock_history_sources(

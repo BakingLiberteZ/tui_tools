@@ -154,6 +154,28 @@
 - Transaction classification now recognizes `type/action=stake|unstake` even when `parameter.entrypoint` is absent, preserving STK/UST rows.
 - UI history type column now falls back to `direction` (`STK`/`UST`) when entrypoint is missing.
 
+## History Reliability Follow-up (2026-02-07)
+
+- Root cause of missing STK/UST rows identified with live TzKT data:
+- `/v1/operations/staking` returns rows as `type="staking"` and `action="stake|unstake|finalize"`.
+- The parser prioritized `type` over `action`, so staking rows were interpreted as `staking` and skipped by the `stake/unstake` filter.
+- Live confirmation (address `tz1iyEws6cPg...`):
+- `transactions?entrypoint=stake|unstake` returned `[]`.
+- `operations/staking?staker=...` returned recent stake/unstake rows with `action` populated.
+- Fix applied in `sassy_wallet/core/tezos.py`:
+- Operation-kind normalization now prefers `action` when `type=="staking"` in:
+- `get_xtz_history` parsing path
+- `resolve_tx_by_hash`
+- `_tzkt_latest_entrypoint_level` match logic
+- Regression coverage added:
+- `tests/test_tzkt_history_dedupe.py`: action-field stake/unstake from staking endpoint.
+- `tests/test_resolve_tx_by_hash.py`: hash-resolve fallback for `type=staking` + `action`.
+- `tests/test_stake_status_infer.py`: infer staking with action-field responses.
+- Validation:
+- `pytest -q` => `87 passed, 1 skipped`.
+- `.venv/bin/ty check` => `All checks passed`.
+- Live `get_xtz_history` pull now includes mixed STK/UST/DEL/TX correctly in top rows.
+
 ## Stake Flow Reliability Notes (2026-02-06)
 
 - Fixed a stake-flow reliability regression where the stake modal could be left without an active owner worker and the payload was not dispatched.
