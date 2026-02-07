@@ -47,3 +47,9 @@ Thumbs.db
 *.tmp
 *.temp
 run.sh
+
+# Local/internal docs
+codexmemory.md
+QA_CHANGE_BAKER.md
+QA_HISTORY_RELIABILITY.md
+SECURITY_FOLLOWUPS.md
