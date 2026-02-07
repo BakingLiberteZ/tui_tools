@@ -148,6 +148,11 @@
 - Some indexer paths return staking amounts as decimal strings; parser now converts decimal XTZ strings to mutez (`_as_amount_mutez`) instead of collapsing to `0`.
 - This prevents real stake/unstake rows from being dropped by shared-hash delegation preference logic.
 - Added regressions in `tests/test_tzkt_history_dedupe.py` for decimal-string stake/unstake amounts with shared hashes.
+- Additional staking history compatibility fix:
+- History fetch now unions stake/unstake transaction queries across both `sender` and `anyof.sender.target` filters.
+- Native staking fetch now unions multiple query variants (`sender`, `staker`, `anyof.sender.target`, `anyof.sender.staker`) and applies strict address-side filtering client-side.
+- Transaction classification now recognizes `type/action=stake|unstake` even when `parameter.entrypoint` is absent, preserving STK/UST rows.
+- UI history type column now falls back to `direction` (`STK`/`UST`) when entrypoint is missing.
 
 ## Stake Flow Reliability Notes (2026-02-06)
 

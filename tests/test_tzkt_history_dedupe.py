@@ -434,3 +434,57 @@ def test_get_xtz_history_prefers_delegation_over_zero_tx_when_hash_is_shared(mon
     assert item.get("kind") == "delegation"
     assert item.get("entrypoint") == "delegation"
     assert item.get("direction") in ("DEL", "UND")
+
+
+def test_get_xtz_history_marks_stake_from_tx_type_when_entrypoint_missing(monkeypatch):
+    address = "tz1SOURCE11111111111111111111111111111"
+    _mock_history_sources(
+        monkeypatch,
+        tx_items=[
+            {
+                "timestamp": "2026-02-06T12:06:45Z",
+                "type": "stake",
+                "sender": {"address": address},
+                "target": {"address": "tz1BAKER11111111111111111111111111111"},
+                "amount": 10_000,
+                "hash": "op_tx_type_stake",
+                "metadata": {},
+            }
+        ],
+        stake_items=[],
+        unstake_items=[],
+        staking_items=[],
+        deleg_items=[],
+    )
+
+    items = tezos.get_xtz_history("https://rpc.tzkt.io/mainnet", address, limit=10)
+    row = next(it for it in items if it.get("hash") == "op_tx_type_stake")
+    assert row.get("direction") == "STK"
+    assert row.get("entrypoint") == "stake"
+
+
+def test_get_xtz_history_includes_staking_rows_by_staker_field(monkeypatch):
+    address = "tz1SOURCE11111111111111111111111111111"
+    _mock_history_sources(
+        monkeypatch,
+        tx_items=[],
+        stake_items=[],
+        unstake_items=[],
+        staking_items=[
+            {
+                "timestamp": "2026-02-06T12:07:00Z",
+                "type": "stake",
+                "staker": {"address": address},
+                "delegate": {"address": "tz1BAKER11111111111111111111111111111", "alias": "Baker One"},
+                "amount": 10_000,
+                "hash": "op_staking_by_staker",
+                "metadata": {},
+            }
+        ],
+        deleg_items=[],
+    )
+
+    items = tezos.get_xtz_history("https://rpc.tzkt.io/mainnet", address, limit=10)
+    row = next(it for it in items if it.get("hash") == "op_staking_by_staker")
+    assert row.get("direction") == "STK"
+    assert row.get("entrypoint") == "stake"

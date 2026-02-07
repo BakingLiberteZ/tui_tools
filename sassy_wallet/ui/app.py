@@ -11436,6 +11436,10 @@ class WalletApp(App):
             type_raw = "STK"
         elif entrypoint == "unstake":
             type_raw = "USTK"
+        elif direction == "STK":
+            type_raw = "STK"
+        elif direction == "UST":
+            type_raw = "USTK"
         else:
             type_raw = "TX"
 

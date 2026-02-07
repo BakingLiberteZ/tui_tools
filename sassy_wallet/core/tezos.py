@@ -1053,7 +1053,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
     }
     tx_url = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(tx_params)
 
-    stake_params = {
+    stake_params_sender = {
         "sender": address,
         "entrypoint": "stake",
         "status": "applied",
@@ -1061,9 +1061,18 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         "sort.desc": "level",
         "withMetadata": "true",
     }
-    stake_url = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(stake_params)
+    stake_url_sender = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(stake_params_sender)
+    stake_params_anyof = {
+        "anyof.sender.target": address,
+        "entrypoint": "stake",
+        "status": "applied",
+        "limit": str(sample_limit),
+        "sort.desc": "level",
+        "withMetadata": "true",
+    }
+    stake_url_anyof = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(stake_params_anyof)
 
-    unstake_params = {
+    unstake_params_sender = {
         "sender": address,
         "entrypoint": "unstake",
         "status": "applied",
@@ -1071,7 +1080,16 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         "sort.desc": "level",
         "withMetadata": "true",
     }
-    unstake_url = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(unstake_params)
+    unstake_url_sender = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(unstake_params_sender)
+    unstake_params_anyof = {
+        "anyof.sender.target": address,
+        "entrypoint": "unstake",
+        "status": "applied",
+        "limit": str(sample_limit),
+        "sort.desc": "level",
+        "withMetadata": "true",
+    }
+    unstake_url_anyof = f"{base}/v1/operations/transactions?" + urllib.parse.urlencode(unstake_params_anyof)
 
     deleg_params = {
         "sender": address,
@@ -1080,16 +1098,46 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         "sort.desc": "level",
     }
     deleg_url = f"{base}/v1/operations/delegations?" + urllib.parse.urlencode(deleg_params)
-    staking_params = {
+    staking_params_sender = {
         "sender": address,
         "status": "applied",
         "limit": str(staking_sample_limit),
         "sort.desc": "level",
     }
-    staking_url = f"{base}/v1/operations/staking?" + urllib.parse.urlencode(staking_params)
+    staking_url_sender = f"{base}/v1/operations/staking?" + urllib.parse.urlencode(staking_params_sender)
+    staking_params_staker = {
+        "staker": address,
+        "status": "applied",
+        "limit": str(staking_sample_limit),
+        "sort.desc": "level",
+    }
+    staking_url_staker = f"{base}/v1/operations/staking?" + urllib.parse.urlencode(staking_params_staker)
+    staking_params_anyof_sender_target = {
+        "anyof.sender.target": address,
+        "status": "applied",
+        "limit": str(staking_sample_limit),
+        "sort.desc": "level",
+    }
+    staking_url_anyof_sender_target = (
+        f"{base}/v1/operations/staking?" + urllib.parse.urlencode(staking_params_anyof_sender_target)
+    )
+    staking_params_anyof_sender_staker = {
+        "anyof.sender.staker": address,
+        "status": "applied",
+        "limit": str(staking_sample_limit),
+        "sort.desc": "level",
+    }
+    staking_url_anyof_sender_staker = (
+        f"{base}/v1/operations/staking?" + urllib.parse.urlencode(staking_params_anyof_sender_staker)
+    )
 
     now = time.time()
-    cache_key = f"{tx_url}|{stake_url}|{unstake_url}|{deleg_url}|{staking_url}"
+    cache_key = (
+        f"{tx_url}|{stake_url_sender}|{stake_url_anyof}|"
+        f"{unstake_url_sender}|{unstake_url_anyof}|{deleg_url}|"
+        f"{staking_url_sender}|{staking_url_staker}|"
+        f"{staking_url_anyof_sender_target}|{staking_url_anyof_sender_staker}"
+    )
     with _tzkt_history_cache_lock:
         cached = _tzkt_history_cache.get(cache_key)
         if cached:
@@ -1123,6 +1171,23 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             log_debug("Optional TzKT history endpoint failed", exception=str(e), url=url)
             return []
         return data if isinstance(data, list) else []
+
+    def _fetch_union(urls: list[str], *, optional: bool = False) -> list[dict]:
+        union: list[dict] = []
+        seen: set[str] = set()
+        for url in urls:
+            rows = _fetch_list_optional(url) if optional else _fetch_list(url)
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                h = str(row.get("hash") or "").strip()
+                rid = str(row.get("id") or "").strip()
+                key = f"{h}|{rid}|{row.get('timestamp') or ''}|{row.get('type') or row.get('kind') or row.get('action') or ''}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                union.append(row)
+        return union
 
     def _op_type(it: dict) -> str:
         raw = it.get("type") or it.get("kind") or it.get("action") or ""
@@ -1173,10 +1238,18 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             return 0
 
     tx_items = _fetch_list(tx_url)
-    stake_items = _fetch_list(stake_url)
-    unstake_items = _fetch_list(unstake_url)
+    stake_items = _fetch_union([stake_url_sender, stake_url_anyof], optional=False)
+    unstake_items = _fetch_union([unstake_url_sender, unstake_url_anyof], optional=False)
     deleg_items = _fetch_list(deleg_url)
-    staking_items = _fetch_list_optional(staking_url)
+    staking_items = _fetch_union(
+        [
+            staking_url_sender,
+            staking_url_staker,
+            staking_url_anyof_sender_target,
+            staking_url_anyof_sender_staker,
+        ],
+        optional=True,
+    )
     deleg_hashes: set[str] = {
         str(it.get("hash") or "").strip()
         for it in deleg_items
@@ -1239,6 +1312,12 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         seen_no_hash_signatures.add(fallback_sig)
         return True
 
+    def _belongs_to_address(it: dict) -> bool:
+        sender = _extract_addr(it, "sender", "source")
+        target = _extract_addr(it, "target", "destination")
+        staker = _extract_addr(it, "staker")
+        return sender == address or target == address or staker == address
+
     for it in tx_items:
         h = str(it.get("hash") or "").strip()
         sender = _extract_addr(it, "sender", "source")
@@ -1246,6 +1325,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         amount_mutez = _as_amount_mutez(it.get("amount"))
         params = it.get("parameter") or it.get("parameters") or {}
         entrypoint = params.get("entrypoint") if isinstance(params, dict) else None
+        op_type = _op_type(it)
         # Prefer explicit delegation semantics when same operation hash appears
         # in the delegations endpoint (common for change-baker side effects).
         if (
@@ -1261,14 +1341,14 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
         op_res = metadata.get("operation_result") or {}
         updates = op_res.get("balance_updates") or metadata.get("balance_updates") or []
 
-        if sender == address and target == address and entrypoint == "stake":
+        if sender == address and (entrypoint == "stake" or op_type == "stake"):
             direction = "STK"
             baker_addr = _delegate_from_updates(updates)
             if not baker_addr:
                 baker_addr = get_delegation_info(rpc, address) or ""
             counterparty = _format_baker_label(rpc, baker_addr)
             baker_label = counterparty
-        elif sender == address and target == address and entrypoint == "unstake":
+        elif sender == address and (entrypoint == "unstake" or op_type == "unstake"):
             direction = "UST"
             baker_addr = _delegate_from_updates(updates)
             if not baker_addr:
@@ -1292,7 +1372,7 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             "counterparty": counterparty,
             "hash": h,
             "kind": "transaction",
-            "entrypoint": entrypoint or "",
+            "entrypoint": entrypoint or op_type or "",
             "_sort_level": _as_int_mutez(it.get("level")),
             "_sort_id": _as_int_mutez(it.get("id")),
         }
@@ -1302,6 +1382,8 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             out.append(item)
 
     for it in stake_items:
+        if not _belongs_to_address(it):
+            continue
         h = it.get("hash") or ""
         amount_mutez = _as_amount_mutez(it.get("amount"))
         # Keep non-zero stake ops even if the same hash appears in delegations:
@@ -1332,6 +1414,8 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
             out.append(item)
 
     for it in unstake_items:
+        if not _belongs_to_address(it):
+            continue
         h = it.get("hash") or ""
         amount_mutez = _as_amount_mutez(it.get("amount"))
         # Keep non-zero unstake ops even if hash overlaps delegation rows.
@@ -1364,6 +1448,8 @@ def get_xtz_history(rpc: str, address: str, limit: int = 20) -> List[Dict[str, A
     # Keep as an additional source because some indexer modes don't expose
     # stake/unstake consistently under /operations/transactions entrypoints.
     for it in staking_items:
+        if not _belongs_to_address(it):
+            continue
         op_kind = _op_type(it)
         if op_kind not in ("stake", "unstake"):
             continue
