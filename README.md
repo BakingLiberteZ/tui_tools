@@ -51,7 +51,7 @@ uv run pip-audit -l --ignore-vuln CVE-2024-23342
 
 ## 🧱 Missing Features
 
-- **Unstake Requests** lifecycle management (track, inspect, and finalize pending requests): **pending**
+- **Unstake Requests** notifications (track and inspect): **pending**
 
 ## 🧠 Why This Exists
 
