@@ -28,6 +28,31 @@ uv run python -m sassy_wallet
 # or: uv run sassy-wallet
 ```
 
+## 🐳 Run With Docker
+
+Build the image:
+
+```bash
+docker build -t sassy-wallet .
+```
+
+Run the TUI wallet in interactive mode with persistent data:
+
+```bash
+docker run --rm -it \
+  -v sassy-wallet-data:/data \
+  sassy-wallet
+```
+
+Use a host directory instead of a named volume:
+
+```bash
+mkdir -p "$HOME/.sassy-wallet-data"
+docker run --rm -it \
+  -v "$HOME/.sassy-wallet-data:/data" \
+  sassy-wallet
+```
+
 ## ✅ Quality Checks
 
 ```bash
@@ -43,6 +68,7 @@ uv run pip-audit -l --ignore-vuln CVE-2024-23342
 
 - Store lives at `~/.local/share/sassy-wallet/wallet.json` (XDG on Linux).
 - Override with `SASSY_WALLET_STORE_PATH` (full file path) or `SASSY_WALLET_DATA_DIR` (directory).
+- Docker image defaults `SASSY_WALLET_DATA_DIR=/data` (mount `/data` for persistence).
 - Legacy `data/wallet.json` is migrated once and kept as a backup.
 
 ## 🛡️ Security
