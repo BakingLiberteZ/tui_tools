@@ -13,6 +13,7 @@ RUN apt-get update \
         build-essential \
         gcc \
         libgmp-dev \
+        libsodium-dev \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,7 +25,8 @@ COPY pyproject.toml setup.py README.md requirements.txt ./
 COPY sassy_wallet ./sassy_wallet
 
 RUN pip install --upgrade pip \
-    && pip install .
+    && pip install . \
+    && python -c "import pysodium, pytezos"
 
 USER appuser
 VOLUME ["/data"]
