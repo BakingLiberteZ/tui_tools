@@ -753,6 +753,23 @@ def _contains_unrevealed_key(err: Any) -> bool:
     return "unrevealed_key" in r_low or "unrevealed manager key" in r_low
 
 
+def _contains_already_revealed_key(err: Any) -> bool:
+    try:
+        s = str(err)
+    except (TypeError, ValueError):
+        s = ""
+    s_low = s.lower()
+    if "previously revealed key" in s_low or "previously revealed public key" in s_low:
+        return True
+
+    try:
+        r = repr(err)
+    except (TypeError, ValueError):
+        r = ""
+    r_low = r.lower()
+    return "previously revealed key" in r_low or "previously revealed public key" in r_low
+
+
 def _is_gas_exhausted_error(err: Exception) -> bool:
     try:
         s = str(err).lower()
@@ -2218,6 +2235,11 @@ def send_xtz(
         except _OP_RETRY_EXCEPTIONS as e:
             # Fallback: RPC no expone helpers/scripts
             if _is_missing_helpers(e):
+                # Composite kinds (e.g., reveal+tx) are retried by the caller via legacy flow.
+                if kind not in ("tx", "reveal"):
+                    raise RuntimeError(
+                        "RPC missing helpers/scripts for batched manager operations; retrying with legacy flow."
+                    ) from e
                 # Intentamos un camino de "fill" (sin simulación) si existe.
                 # Para que esto funcione, necesitamos fee/gas/storage ya seteados en el contenido.
                 # Si el user no pasó overrides, ponemos defaults.
@@ -2296,24 +2318,51 @@ def send_xtz(
             return res['hash']
         return res
 
-    try:
-        return _inject(_build_tx_op(), kind='tx')
-
-    except _OP_RETRY_EXCEPTIONS as e:
-        if not _contains_unrevealed_key(e):
-            raise
-
-        # Reveal SIEMPRE separado
-        try:
-            reveal_oph = _inject(_build_reveal_op(), kind='reveal')
-        except _OP_RETRY_EXCEPTIONS as rev_e:
-            raise RuntimeError(f"Reveal failed: {rev_e}") from rev_e
-
-        # Retry send
+    def _send_with_legacy_reveal_fallback():
         try:
             return _inject(_build_tx_op(), kind='tx')
-        except _OP_RETRY_EXCEPTIONS as send_e:
-            raise RuntimeError(f"Send failed after reveal ({reveal_oph}): {send_e}") from send_e
+        except _OP_RETRY_EXCEPTIONS as e:
+            if not _contains_unrevealed_key(e):
+                raise
+
+            # Legacy path: reveal in a separate operation and retry tx.
+            try:
+                reveal_oph = _inject(_build_reveal_op(), kind='reveal')
+            except _OP_RETRY_EXCEPTIONS as rev_e:
+                raise RuntimeError(f"Reveal failed: {rev_e}") from rev_e
+
+            try:
+                return _inject(_build_tx_op(), kind='tx')
+            except _OP_RETRY_EXCEPTIONS as send_e:
+                raise RuntimeError(f"Send failed after reveal ({reveal_oph}): {send_e}") from send_e
+
+    from_addr: str | None = None
+    try:
+        from_addr = key.public_key_hash()
+    except (TypeError, ValueError, AttributeError) as e:
+        log_debug("Failed to derive source address for pre-reveal check", exception=str(e))
+
+    reveal_needed = False
+    if from_addr:
+        try:
+            reveal_needed = not is_revealed(rpc, from_addr)
+        except _OP_RETRY_EXCEPTIONS as e:
+            log_debug("Pre-send reveal check failed; falling back to legacy send flow", exception=str(e))
+            reveal_needed = False
+
+    # Preferred path: first send should include reveal + transaction in the same operation group.
+    if reveal_needed:
+        try:
+            batched_op = client.bulk(_build_reveal_op(), _build_tx_op())
+            return _inject(batched_op, kind='reveal_tx')
+        except _OP_RETRY_EXCEPTIONS as e:
+            # Recover with the legacy split flow for RPC/helper incompatibility or race conditions.
+            if _is_missing_helpers(e) or _contains_unrevealed_key(e) or _contains_already_revealed_key(e):
+                log_warning("Batched reveal+tx path failed; retrying with legacy split flow", exception=e)
+            else:
+                raise
+
+    return _send_with_legacy_reveal_fallback()
 
 
 def delegate_to_baker(rpc: str, key: Key, baker_address: str, fee_mutez: Optional[int] = None, gas_limit: Optional[int] = None, storage_limit: Optional[int] = None) -> str:
