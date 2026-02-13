@@ -3,7 +3,7 @@
 
 textual==7.5.0
 pytezos==3.17.0
-cryptography==46.0.4
+cryptography==46.0.5
 base58==2.1.1
 requests==2.32.5
 urllib3==2.6.3
