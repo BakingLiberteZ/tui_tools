@@ -37,6 +37,20 @@ def get_recipient_comment() -> str:
     return secrets.choice(RECIPIENT_COMMENTS)
 
 
+SELF_SEND_WARNINGS = [
+    "You can't send to your own wallet, chef. That's the same baguette in the same oven. 🥖🔥",
+    "Nice try, baker. Self-sending won't create extra croissants. 🥐",
+    "Destination equals source. That's not a transfer, that's a kitchen loop. 🔁👨‍🍳",
+    "Sending to yourself? Bold strategy. The dough stays in the same bowl. 🥣",
+    "Wrong tray, chef. You're plating to the same wallet. 🍽️",
+]
+
+
+def get_self_send_warning() -> str:
+    """Get a random warning when destination equals source wallet."""
+    return secrets.choice(SELF_SEND_WARNINGS)
+
+
 # ============================================================================
 # AMOUNT COMMENTARY
 # Tiered comments based on the amount being sent

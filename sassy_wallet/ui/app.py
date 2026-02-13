@@ -94,7 +94,12 @@ from sassy_wallet.messages.empty_wallet import get_empty_wallet_message
 from sassy_wallet.messages.balance import get_balance_message
 from sassy_wallet.messages.modal import get_modal_message
 from sassy_wallet.messages.baker_commentary_short import get_baker_commentary_short
-from sassy_wallet.messages.send_commentary import get_recipient_comment, get_amount_comment, get_confirmation_comment
+from sassy_wallet.messages.send_commentary import (
+    get_recipient_comment,
+    get_amount_comment,
+    get_confirmation_comment,
+    get_self_send_warning,
+)
 from sassy_wallet.messages.send_status import get_send_baked_message
 from sassy_wallet.messages.advanced_mode import get_advanced_mode_message
 from sassy_wallet.ui.input_utils import (
@@ -2840,16 +2845,29 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
         align: center middle;
     }
 
-    ImportWizardScreen > Vertical {
+    ImportWizardScreen #wizard_modal {
         width: auto;
-        min-width: 65;
-        max-width: 80;
-        height: auto;
-        max-height: 30;
-        overflow-y: auto;
+        min-width: 70;
+        max-width: 88;
+        height: 90%;
+        min-height: 24;
+        max-height: 40;
         background: $surface;
         border: solid $primary;
         padding: 1 2;
+    }
+
+    ImportWizardScreen #wizard_content {
+        height: 1fr;
+        min-height: 0;
+        overflow-y: hidden;
+    }
+
+    ImportWizardScreen #wizard_actions {
+        height: 3;
+        min-height: 3;
+        align: center middle;
+        margin-top: 0;
     }
 
     ImportWizardScreen .hidden {
@@ -2964,55 +2982,56 @@ class ImportWizardScreen(ModalScreen[Optional[dict]]):
         self._backup_encrypted: dict | None = None
 
     def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static("", id="title", markup=True)
-            yield Static("", id="error", markup=True)
-            yield ListView(id="import_types")
-            yield Static("", id="hint", markup=True)
-            yield Input(placeholder="Wallet name (e.g., Savings)", id="inp_name")
-            yield Input(placeholder="Secret key (edsk... or edesk...)", id="inp_secret", password=True)
-            yield Input(
-                placeholder="Passphrase for encrypted secret (edesk, if applicable)",
-                id="inp_secret_pass",
-                password=True,
-            )
-            yield Input(
-                placeholder="12-word mnemonic (space separated)",
-                id="inp_mnemonic",
-            )
-            yield Input(
-                placeholder="Derivation path (m/44'/1729'/0'/0') — leave blank for default",
-                id="inp_mnemonic_path",
-            )
-            yield Input(placeholder="BIP39 passphrase (optional)", id="inp_mnemonic_pass", password=True)
-            yield Input(placeholder="Password to encrypt wallet", id="inp_passphrase", password=True)
-            yield Static(
-                "[#d4a857]Password encrypts keys (AES-256-GCM + scrypt).[/#d4a857]",
-                id="secret_hint",
-                markup=True,
-            )
-            yield Static(
-                "[#d4a857]Password encrypts keys (AES-256-GCM + scrypt).[/#d4a857]",
-                id="mnemonic_store_hint",
-                markup=True,
-            )
-            yield ListView(id="mnemonic_options")
-            yield Input(placeholder="Wallet name (e.g., Watcher)", id="inp_watch_name")
-            yield Input(placeholder="Public address (tz1...)", id="inp_watch_addr")
-            with Vertical(id="backup_path_block"):
-                with Horizontal(id="backup_path_row"):
-                    yield Input(placeholder="Backup file path", id="inp_backup_path")
-                    yield Button("Browse", id="browse", variant="primary")
+        with Vertical(id="wizard_modal"):
+            with Vertical(id="wizard_content"):
+                yield Static("", id="title", markup=True)
+                yield Static("", id="error", markup=True)
+                yield ListView(id="import_types")
+                yield Static("", id="hint", markup=True)
+                yield Input(placeholder="Wallet name (e.g., Savings)", id="inp_name")
+                yield Input(placeholder="Secret key (edsk... or edesk...)", id="inp_secret", password=True)
+                yield Input(
+                    placeholder="Passphrase for encrypted secret (edesk, if applicable)",
+                    id="inp_secret_pass",
+                    password=True,
+                )
+                yield Input(
+                    placeholder="12-word mnemonic (space separated)",
+                    id="inp_mnemonic",
+                )
+                yield Input(
+                    placeholder="Derivation path (m/44'/1729'/0'/0') — leave blank for default",
+                    id="inp_mnemonic_path",
+                )
+                yield Input(placeholder="BIP39 passphrase (optional)", id="inp_mnemonic_pass", password=True)
+                yield Input(placeholder="Password to encrypt wallet", id="inp_passphrase", password=True)
                 yield Static(
-                    "[dim]Bulk backups will restore all wallets.[/dim]",
-                    id="bulk_hint",
+                    "[#d4a857]Password encrypts keys (AES-256-GCM + scrypt).[/#d4a857]",
+                    id="secret_hint",
                     markup=True,
                 )
-            yield Input(placeholder="Backup encryption password", id="inp_backup_pass", password=True)
-            yield DirectoryTree(path=Path.home(), id="file_picker")
-            with Horizontal(id="browse_row"):
-                yield Button("Select", id="select_file", variant="primary")
-            with Horizontal():
+                yield Static(
+                    "[#d4a857]Password encrypts keys (AES-256-GCM + scrypt).[/#d4a857]",
+                    id="mnemonic_store_hint",
+                    markup=True,
+                )
+                yield ListView(id="mnemonic_options")
+                yield Input(placeholder="Wallet name (e.g., Watcher)", id="inp_watch_name")
+                yield Input(placeholder="Public address (tz1...)", id="inp_watch_addr")
+                with Vertical(id="backup_path_block"):
+                    with Horizontal(id="backup_path_row"):
+                        yield Input(placeholder="Backup file path", id="inp_backup_path")
+                        yield Button("Browse", id="browse", variant="primary")
+                    yield Static(
+                        "[dim]Bulk backups will restore all wallets.[/dim]",
+                        id="bulk_hint",
+                        markup=True,
+                    )
+                yield Input(placeholder="Backup encryption password", id="inp_backup_pass", password=True)
+                yield DirectoryTree(path=Path.home(), id="file_picker")
+                with Horizontal(id="browse_row"):
+                    yield Button("Select", id="select_file", variant="primary")
+            with Horizontal(id="wizard_actions"):
                 yield Button("← Back", id="back", variant="default")
                 yield Button("Next", id="next", variant="primary")
                 yield Button("Import", id="import", variant="primary")
@@ -8398,7 +8417,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
             to_input.focus()
             return
         if self.selected_account and to_addr == self.selected_account.address:
-            self._set_hint("[red]✗ Cannot send to the same wallet[/red]")
+            self._set_hint(f"[red]✗ {get_self_send_warning()}[/red]")
             to_input.focus()
             return
 
@@ -8684,7 +8703,7 @@ class DestinationPickerScreen(ModalScreen[str]):
 
         # Check if sending to self
         if value == self.from_address:
-            self._set_dest_hint("[red]✗ Cannot send to yourself[/red]")
+            self._set_dest_hint(f"[red]✗ {get_self_send_warning()}[/red]")
             self._set_sassy_comment("")
             return
 
