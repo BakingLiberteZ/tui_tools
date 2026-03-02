@@ -1,7 +1,7 @@
 # Sassy Wallet - Runtime dependencies
 # Preferred workflow: `uv sync --dev` from pyproject.toml
 
-textual==7.5.0
+textual==8.0.1
 pytezos==3.17.0
 cryptography==46.0.5
 base58==2.1.1
