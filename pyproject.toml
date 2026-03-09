@@ -27,7 +27,7 @@ classifiers = [
 keywords = ["tezos", "wallet", "cryptocurrency", "tui", "cli", "blockchain"]
 requires-python = ">=3.10"
 dependencies = [
-    "textual==7.5.0",
+    "textual==8.0.2",
     "pytezos==3.17.0",
     "cryptography==46.0.5",
     "base58==2.1.1",
