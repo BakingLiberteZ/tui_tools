@@ -34,7 +34,7 @@ dependencies = [
     "requests==2.32.5",
     "urllib3==2.6.3",
     "mnemonic==0.21",
-    "bip_utils==2.10.0",
+    "bip_utils==2.12.1",
 ]
 
 [project.optional-dependencies]
