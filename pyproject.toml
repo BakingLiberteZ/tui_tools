@@ -42,7 +42,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.9.0",
-    "ty>=0.0.1",
+    "ty>=0.0.29",
     "bandit>=1.7.0",
     "pip-audit>=2.7.0",
 ]
